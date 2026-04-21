@@ -63,6 +63,8 @@ let referenceTrackCounter = 0;
 let initialCardEstimateToken = 0;
 let sourceSubtitleTextStats = null;
 let runtimeDefaults = {};
+const expandedContextHistory = new Set();
+const renderedContextSnapshots = new Map();
 
 const PROMPT_FIELD_IDS = [
   "prompt_translation_system",
@@ -610,59 +612,132 @@ function shouldShowGlossaryDetail(meaning, keep) {
   return meaning.length > 240 || (keep && meaning.length > 210);
 }
 
-function renderSessionSnapshot(snapshot, compact = false) {
+function cloneSnapshot(snapshot) {
+  return snapshot ? JSON.parse(JSON.stringify(snapshot)) : null;
+}
+
+function snapshotValueSignature(value) {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function buildNamedEntryMap(items, keyName) {
+  const map = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = String(item?.[keyName] || "").trim().toLowerCase();
+    if (!key) continue;
+    map.set(key, snapshotValueSignature(item));
+  }
+  return map;
+}
+
+function diffSessionSnapshot(previousSnapshot, currentSnapshot) {
+  const changedFields = new Set();
+  const changedCharacters = new Set();
+  const changedGlossary = new Set();
+  if (!previousSnapshot || !currentSnapshot) {
+    return { changedFields, changedCharacters, changedGlossary, hasChanges: false };
+  }
+
+  for (const field of ["premise", "tone", "scene_context", "style_notes", "unresolved_ambiguities"]) {
+    if (snapshotValueSignature(previousSnapshot[field]) !== snapshotValueSignature(currentSnapshot[field])) {
+      changedFields.add(field);
+    }
+  }
+
+  const previousCharacters = buildNamedEntryMap(previousSnapshot.characters, "name");
+  const currentCharacters = buildNamedEntryMap(currentSnapshot.characters, "name");
+  for (const [key, value] of currentCharacters.entries()) {
+    if (previousCharacters.get(key) !== value) {
+      changedCharacters.add(key);
+    }
+  }
+  if (changedCharacters.size) {
+    changedFields.add("characters");
+  }
+
+  const previousGlossary = buildNamedEntryMap(previousSnapshot.glossary, "term");
+  const currentGlossary = buildNamedEntryMap(currentSnapshot.glossary, "term");
+  for (const [key, value] of currentGlossary.entries()) {
+    if (previousGlossary.get(key) !== value) {
+      changedGlossary.add(key);
+    }
+  }
+  if (changedGlossary.size) {
+    changedFields.add("glossary");
+  }
+
+  return {
+    changedFields,
+    changedCharacters,
+    changedGlossary,
+    hasChanges: changedFields.size > 0,
+  };
+}
+
+function updateClassName(baseClass, active) {
+  return active ? `${baseClass} is-updated` : baseClass;
+}
+
+function renderSessionSnapshot(snapshot, compact = false, delta = null) {
   if (!snapshot) return "";
 
   const characters = (snapshot.characters || []).slice(0, compact ? 6 : 12);
   const glossary = (snapshot.glossary || []).slice(0, compact ? 4 : 8);
   const styleNotes = (snapshot.style_notes || []).slice(0, compact ? 4 : 8);
   const ambiguities = snapshot.unresolved_ambiguities || [];
+  const changedFields = delta?.changedFields || new Set();
+  const changedCharacters = delta?.changedCharacters || new Set();
+  const changedGlossary = delta?.changedGlossary || new Set();
 
   return `
-    <div class="context-card">
+    <div class="${updateClassName("context-card", Boolean(delta?.hasChanges))}">
       ${snapshot.premise ? `
-        <div class="tile">
+        <div class="${updateClassName("tile", changedFields.has("premise"))}">
           <div class="mini-eyebrow">Premise</div>
           <p>${escapeHtml(snapshot.premise)}</p>
         </div>
       ` : ""}
 
       ${snapshot.tone ? `
-        <div class="tile">
+        <div class="${updateClassName("tile", changedFields.has("tone"))}">
           <div class="mini-eyebrow">Tone</div>
           <p>${escapeHtml(snapshot.tone)}</p>
         </div>
       ` : ""}
 
       ${snapshot.scene_context ? `
-        <div class="scene">
+        <div class="${updateClassName("scene", changedFields.has("scene_context"))}">
           <div class="mini-eyebrow">Scene</div>
           <div>${escapeHtml(snapshot.scene_context)}</div>
         </div>
       ` : ""}
 
       ${styleNotes.length ? `
-        <div class="tile">
+        <div class="${updateClassName("tile", changedFields.has("style_notes"))}">
           <div class="mini-eyebrow">Style Notes</div>
           <ul>${styleNotes.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
         </div>
       ` : ""}
 
       ${characters.length ? `
-        <div>
+        <div class="${changedFields.has("characters") ? "context-section is-updated" : "context-section"}">
           <div class="mini-eyebrow">Characters</div>
           <div class="grid grid-characters">
             ${characters.map(character => {
               const name = character.name || "Unnamed";
               const role = character.role || "No role summary yet.";
               const aliases = Array.isArray(character.aliases) ? character.aliases.filter(Boolean) : [];
+              const characterKey = String(name).trim().toLowerCase();
               const showDetail = shouldShowCharacterDetail(role, aliases);
               const detailBody = [
                 role,
                 aliases.length ? `Aliases: ${aliases.join(", ")}` : "Aliases: none",
               ].join("\n\n");
               return `
-              <div class="tile tile-fixed">
+              <div class="${updateClassName("tile tile-fixed", changedCharacters.has(characterKey))}">
                 <h4>
                   <span class="tile-title-text">${escapeHtml(name)}</span>
                   ${character.gender && character.gender !== "unknown" ? tooltipTag(character.gender.toUpperCase(), "Character metadata inferred from the active scene context.") : ""}
@@ -678,16 +753,17 @@ function renderSessionSnapshot(snapshot, compact = false) {
       ` : ""}
 
       ${glossary.length ? `
-        <div>
+        <div class="${changedFields.has("glossary") ? "context-section is-updated" : "context-section"}">
           <div class="mini-eyebrow">Glossary</div>
           <div class="grid grid-glossary">
             ${glossary.map(entry => {
               const term = entry.term || "Untitled term";
               const meaning = entry.meaning || "No glossary note yet.";
+              const glossaryKey = String(term).trim().toLowerCase();
               const showDetail = shouldShowGlossaryDetail(meaning, Boolean(entry.keep));
               const detailBody = meaning;
               return `
-              <div class="tile tile-fixed">
+              <div class="${updateClassName("tile tile-fixed", changedGlossary.has(glossaryKey))}">
                 <h4>
                   <span class="tile-title-text">${escapeHtml(term)}</span>
                   ${entry.keep ? tooltipTag("Keep", "Preserve this term as written during translation.") : ""}
@@ -702,7 +778,7 @@ function renderSessionSnapshot(snapshot, compact = false) {
       ` : ""}
 
       ${ambiguities.length ? `
-        <div class="tile">
+        <div class="${updateClassName("tile", changedFields.has("unresolved_ambiguities"))}">
           <div class="mini-eyebrow">Ambiguities</div>
           <ul>${ambiguities.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
         </div>
@@ -906,6 +982,9 @@ function renderContext(job) {
   const ctx = job.session_context;
   if (!ctx) return "";
   const previous = (job.session_context_history || [])[1];
+  const previousRendered = renderedContextSnapshots.get(job.id) || null;
+  const delta = diffSessionSnapshot(previousRendered, ctx);
+  renderedContextSnapshots.set(job.id, cloneSnapshot(ctx));
   const validation = job.validation_stats || {};
   const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
   const canResume = job.status === "paused" || job.status === "failed";
@@ -948,7 +1027,7 @@ function renderContext(job) {
           "Subtitle lines fixed automatically by retry or manually in the review panel.",
           "fixed",
         )}
-        ${validationStat(
+      ${validationStat(
           job.id,
           "Error",
           validation.error_subtitles || 0,
@@ -957,12 +1036,19 @@ function renderContext(job) {
           "error",
         )}
       </div>
-      ${renderSessionSnapshot(ctx)}
+      ${renderSessionSnapshot(ctx, false, delta)}
       ${previous ? `
-        <div class="tile">
-          <div class="mini-eyebrow">Previous Snapshot</div>
-          ${renderSessionSnapshot(previous, true)}
-        </div>
+        <details class="context-history tile" data-context-history="${escapeHtml(job.id)}" ${expandedContextHistory.has(job.id) ? "open" : ""}>
+          <summary class="context-history-summary">
+            <div>
+              <div class="mini-eyebrow">Previous Snapshot</div>
+              <div class="context-history-preview">${escapeHtml(previous.scene_context || previous.premise || "Open the previous card snapshot.")}</div>
+            </div>
+          </summary>
+          <div class="context-history-body">
+            ${renderSessionSnapshot(previous, true)}
+          </div>
+        </details>
       ` : ""}
     </div>
   `;
@@ -1088,6 +1174,10 @@ function renderLogDialog(job) {
   const logs = Array.isArray(job.logs) ? job.logs : [];
   const issues = Array.isArray(job.validation_issues) ? job.validation_issues : [];
   const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
+  const previousScrollTop = logDialogBody.scrollTop;
+  const previousScrollHeight = logDialogBody.scrollHeight;
+  const previousClientHeight = logDialogBody.clientHeight;
+  const wasNearBottom = previousScrollHeight - (previousScrollTop + previousClientHeight) < 48;
   logDialogTitle.textContent = `${title} Log`;
   if (!logs.length && !issues.length && !referenceTracks.length) {
     logDialogBody.innerHTML = `<p class="job-meta">No verbose events yet.</p>`;
@@ -1141,7 +1231,13 @@ function renderLogDialog(job) {
       </div>
     ` : ""}
   `;
-  logDialogBody.scrollTop = logDialogBody.scrollHeight;
+  if (wasNearBottom) {
+    logDialogBody.scrollTop = logDialogBody.scrollHeight;
+    return;
+  }
+  const nextScrollHeight = logDialogBody.scrollHeight;
+  const heightDelta = Math.max(0, nextScrollHeight - previousScrollHeight);
+  logDialogBody.scrollTop = previousScrollTop + heightDelta;
 }
 
 function filterIssues(issues, filter) {
@@ -1854,8 +1950,29 @@ async function generateMainContext() {
 }
 
 document.addEventListener("click", (event) => {
+  const historySummary = event.target.closest(".context-history-summary");
+  if (historySummary) {
+    const details = historySummary.closest("[data-context-history]");
+    const jobId = details?.dataset.contextHistory;
+    if (jobId) {
+      const nextOpen = !details.hasAttribute("open");
+      if (nextOpen) {
+        expandedContextHistory.add(jobId);
+      } else {
+        expandedContextHistory.delete(jobId);
+      }
+    }
+  }
   const workspaceCard = event.target.closest(".job-workspace-link[data-workspace-url]");
   if (workspaceCard && !event.target.closest("button, a, input, textarea, select, summary, label")) {
+    const selection = window.getSelection();
+    const hasTextSelection = selection
+      && String(selection.toString() || "").trim().length > 0
+      && workspaceCard.contains(selection.anchorNode)
+      && workspaceCard.contains(selection.focusNode);
+    if (hasTextSelection) {
+      return;
+    }
     window.location.href = workspaceCard.dataset.workspaceUrl;
     return;
   }
@@ -1968,6 +2085,18 @@ document.addEventListener("change", (event) => {
   const referenceFileInput = event.target.closest("[data-reference-file]");
   if (referenceFileInput) {
     updateReferenceTrackLabel(referenceFileInput.closest(".reference-track-row"));
+  }
+});
+
+document.addEventListener("toggle", (event) => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.matches("[data-context-history]")) return;
+  const jobId = details.dataset.contextHistory;
+  if (!jobId) return;
+  if (details.open) {
+    expandedContextHistory.add(jobId);
+  } else {
+    expandedContextHistory.delete(jobId);
   }
 });
 

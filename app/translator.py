@@ -235,7 +235,26 @@ def _extract_json_blob(text: str) -> dict[str, Any]:
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
         raise ValueError("No JSON object found in model response")
-    return json.loads(text[start:end + 1])
+    blob = text[start:end + 1]
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError as exc:
+        line = int(getattr(exc, "lineno", 0) or 0)
+        column = int(getattr(exc, "colno", 0) or 0)
+        context_line = ""
+        lines = blob.splitlines()
+        if line and 1 <= line <= len(lines):
+            context_line = lines[line - 1].strip()
+        if len(context_line) > 160:
+            context_line = context_line[:157] + "..."
+        message = (
+            f"Model returned invalid JSON at line {line}, column {column}. "
+            "This usually means the response was truncated, mixed JSON with commentary, "
+            "or broke the required schema."
+        )
+        if context_line:
+            message += f" Near: {context_line}"
+        raise ValueError(message) from exc
 
 
 def _clean_subtitle_block_text(value: str) -> str:
