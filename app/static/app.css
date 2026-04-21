@@ -1347,6 +1347,23 @@ code {
   display: grid;
   gap: 0.9rem;
 }
+.review-progress-card {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.review-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.review-progress-card .progress {
+  margin-top: 0;
+}
 .review-toolbar-actions {
   display: flex;
   flex-wrap: wrap;

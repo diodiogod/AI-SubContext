@@ -1,5 +1,9 @@
 const titleEl = document.getElementById("review-page-title");
 const metaEl = document.getElementById("review-page-meta");
+const progressCardEl = document.getElementById("review-progress-card");
+const progressStatusEl = document.getElementById("review-progress-status");
+const progressValueEl = document.getElementById("review-progress-value");
+const progressBarEl = document.getElementById("review-progress-bar");
 const refreshBtn = document.getElementById("review-page-refresh");
 const filtersEl = document.getElementById("review-page-filters");
 const searchEl = document.getElementById("review-search");
@@ -84,6 +88,12 @@ function splitListText(value) {
 
 function statusBadge(status) {
   return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+}
+
+function formatProgress(value) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : 0;
+  const bounded = Math.max(0, Math.min(100, numeric));
+  return `${Math.round(bounded)}%`;
 }
 
 function tooltipTag(label, tooltip, className = "inline-badge") {
@@ -691,6 +701,19 @@ function renderHeader(job) {
   const referenceTracks = Array.isArray(job?.reference_tracks) ? job.reference_tracks : [];
   titleEl.textContent = job.title || job.filename || "Review";
   metaEl.textContent = `${job.filename || "Job"} • ${job.settings?.source_language || "src"} → ${job.settings?.target_language || "tgt"} • ${job.settings?.model || "model"}${referenceTracks.length ? ` • ${referenceTracks.length} reference track(s)` : ""}`;
+  const progress = formatProgress(job.progress || 0);
+  if (progressStatusEl) {
+    progressStatusEl.innerHTML = statusBadge(job.status || "queued");
+  }
+  if (progressValueEl) {
+    progressValueEl.textContent = progress;
+  }
+  if (progressBarEl) {
+    progressBarEl.style.width = `${Math.max(0, Math.min(100, Number(job.progress || 0)))}%`;
+  }
+  if (progressCardEl) {
+    progressCardEl.classList.toggle("is-idle", !["processing", "paused", "queued", "failed", "completed"].includes(job.status));
+  }
 }
 
 function renderAll() {

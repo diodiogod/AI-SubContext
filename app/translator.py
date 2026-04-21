@@ -617,6 +617,25 @@ def _line_looks_untranslated(source_text: str, translated_text: str) -> bool:
     return overlap >= 0.82
 
 
+def _line_has_strong_failure_signal(
+    settings: TranslationSettings,
+    source_text: str,
+    translated_text: str,
+    validation: BatchValidationResult | None = None,
+) -> bool:
+    source = _normalize_text(source_text)
+    translated = _normalize_text(translated_text)
+    source_code = _normalize_language_code(settings.source_language)
+
+    if not translated:
+        return True
+    if len(source) >= 8 and source.casefold() == translated.casefold():
+        return True
+    if validation and validation.detected_language and validation.detected_language == source_code:
+        return True
+    return False
+
+
 def _batch_failure_threshold(batch_size: int) -> int:
     if batch_size <= 3:
         return 1
@@ -725,6 +744,27 @@ def _validation_notes(
     if validation.reason:
         notes.append(validation.reason)
     return notes
+
+
+def _strong_repair_positions(
+    settings: TranslationSettings,
+    batch_lines: list[SubtitleLine],
+    translated_lines: list[SubtitleLine],
+    validation: BatchValidationResult,
+    flagged_positions: list[int],
+) -> list[int]:
+    source_by_position = {line.position: line.text for line in batch_lines}
+    translated_by_position = {line.position: line.text for line in translated_lines}
+    return [
+        position
+        for position in flagged_positions
+        if _line_has_strong_failure_signal(
+            settings,
+            source_by_position.get(position, ""),
+            translated_by_position.get(position, ""),
+            validation,
+        )
+    ]
 
 
 def _reason_codes_for_line(
@@ -1573,17 +1613,62 @@ class OpenAICompatibleTranslator:
                 )
             if not validation.failed:
                 if flagged_positions:
-                    repaired_lines, repair_stats = await self._repair_suspicious_lines(
+                    strong_repair_positions = _strong_repair_positions(
                         settings,
                         batch_lines,
                         translated_lines,
-                        merged_context,
+                        validation,
                         flagged_positions,
-                        reference_subtitles_by_position=reference_subtitles_by_position,
-                        batch_index=batch_index,
-                        log_event=log_event,
                     )
-                    return repaired_lines, merged_context, repair_stats
+                    if strong_repair_positions:
+                        if log_event and len(strong_repair_positions) != len(flagged_positions):
+                            skipped = [position + 1 for position in flagged_positions if position not in strong_repair_positions]
+                            log_event(
+                                "info",
+                                "Skipping automatic isolated retry for borderline suspect lines: "
+                                + ", ".join(str(item) for item in skipped[:8]),
+                            )
+                        repaired_lines, repair_stats = await self._repair_suspicious_lines(
+                            settings,
+                            batch_lines,
+                            translated_lines,
+                            merged_context,
+                            strong_repair_positions,
+                            reference_subtitles_by_position=reference_subtitles_by_position,
+                            batch_index=batch_index,
+                            log_event=log_event,
+                        )
+                        remaining_flagged = [position for position in flagged_positions if position not in strong_repair_positions]
+                        if remaining_flagged:
+                            notes = _validation_notes(validation, settings, remaining_flagged)
+                            repair_stats.suspicious_count += len(remaining_flagged)
+                            repair_stats.issues.extend(
+                                _build_validation_issues(
+                                    settings,
+                                    "suspect",
+                                    remaining_flagged,
+                                    batch_lines,
+                                    repaired_lines,
+                                    batch_index,
+                                    notes,
+                                    validation=validation,
+                                )
+                            )
+                        return repaired_lines, merged_context, repair_stats
+                    notes = _validation_notes(validation, settings, flagged_positions)
+                    return translated_lines, merged_context, BatchProcessingStats(
+                        suspicious_count=len(flagged_positions),
+                        issues=_build_validation_issues(
+                            settings,
+                            "suspect",
+                            flagged_positions,
+                            batch_lines,
+                            translated_lines,
+                            batch_index,
+                            notes,
+                            validation=validation,
+                        ),
+                    )
                 if attempt_index == 2 and first_failed_positions:
                     notes = ["Validation cleared after retry with stricter instruction."]
                     return translated_lines, merged_context, BatchProcessingStats(

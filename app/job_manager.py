@@ -19,7 +19,13 @@ from app.models import (
     SubtitleValidationIssue,
     TranslationJob,
 )
-from app.srt_utils import align_reference_track, chunk_lines, compose_translated_srt, parse_srt_text
+from app.srt_utils import (
+    align_reference_track,
+    chunk_lines,
+    compose_translated_srt,
+    parse_srt_text,
+    strip_ai_disclosure_line,
+)
 from app.translator import OpenAICompatibleTranslator
 
 
@@ -594,6 +600,7 @@ class JobManager:
     ) -> TranslationJob:
         _, source_lines = parse_srt_text(source_srt)
         _, translated_lines = parse_srt_text(translated_srt)
+        translated_lines = strip_ai_disclosure_line(translated_lines)
         reference_tracks = self._build_reference_tracks(source_lines, reference_sources)
         job = TranslationJob(
             filename=translated_filename,

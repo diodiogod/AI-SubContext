@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from statistics import median
 from typing import Iterable
 
 import srt
 
 from app.models import ReferenceSubtitleMatch, ReferenceSubtitleTrack, SubtitleLine
+
+
+AI_DISCLOSURE_TEXT = "# Context control translated subtitles by AI SubContext #"
+AI_DISCLOSURE_DELAY_SECONDS = 60
+AI_DISCLOSURE_DURATION_SECONDS = 2
 
 
 def parse_srt_text(content: str) -> tuple[list[srt.Subtitle], list[SubtitleLine]]:
@@ -39,7 +45,32 @@ def compose_translated_srt(subtitles: list[srt.Subtitle], translated_lines: Iter
                 proprietary=sub.proprietary,
             )
         )
+    if new_subtitles:
+        last_end = max(sub.end for sub in new_subtitles)
+        disclosure_start = last_end + timedelta(seconds=AI_DISCLOSURE_DELAY_SECONDS)
+        disclosure_end = disclosure_start + timedelta(seconds=AI_DISCLOSURE_DURATION_SECONDS)
+        new_subtitles.append(
+            srt.Subtitle(
+                index=len(new_subtitles) + 1,
+                start=disclosure_start,
+                end=disclosure_end,
+                content=AI_DISCLOSURE_TEXT,
+            )
+        )
     return srt.compose(new_subtitles)
+
+
+def strip_ai_disclosure_line(lines: list[SubtitleLine]) -> list[SubtitleLine]:
+    if not lines:
+        return lines
+    trailing_text = _normalize_disclosure_text(lines[-1].text)
+    if trailing_text != _normalize_disclosure_text(AI_DISCLOSURE_TEXT):
+        return lines
+    return list(lines[:-1])
+
+
+def _normalize_disclosure_text(value: str) -> str:
+    return " ".join(str(value or "").split()).strip()
 
 
 def timestamp_to_milliseconds(value: str) -> int:

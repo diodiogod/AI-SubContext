@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260421-6" />
+    <link rel="stylesheet" href="/static/app.css?v=20260421-11" />
   </head>
   <body>
     <main class="shell review-shell">
@@ -27,6 +27,13 @@
           </div>
         </div>
         <div class="review-toolbar">
+          <div id="review-progress-card" class="review-progress-card">
+            <div class="review-progress-head">
+              <div id="review-progress-status"></div>
+              <div id="review-progress-value" class="job-progress-value">0%</div>
+            </div>
+            <div class="progress"><div id="review-progress-bar" class="progress-bar" style="width:0%"></div></div>
+          </div>
           <div class="review-filter-row" id="review-page-filters"></div>
           <div class="review-toolbar-actions">
             <input id="review-search" type="search" placeholder="Search source, translation, status, reason, or reference" />
@@ -92,6 +99,6 @@
       </form>
     </dialog>
 
-    <script src="/static/review.js?v=20260421-4"></script>
+    <script src="/static/review.js?v=20260421-5"></script>
   </body>
   </html>
