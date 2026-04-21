@@ -5,6 +5,19 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-04-21
+
+### Added
+
+- Review Workspace now shows live translation status and percentage while a job is still running
+- Automatic subtitle repair is less aggressive and leaves borderline suspect lines for manual review instead of over-retrying them
+- Exported translated subtitles now include a branded final disclosure line
+- Reviewing one of the app's own exported subtitles ignores that disclosure footer automatically
+- The final disclosure subtitle now stays on screen for only two seconds
+
+### Changed
+
+- Improve review workflow and subtitle export disclosure
 ## [0.2.1] - 2026-04-21
 
 ### Added
