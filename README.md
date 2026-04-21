@@ -2,7 +2,7 @@
 
 This tool uses a large language model to translate subtitle files with context awareness, preserving meaning, terminology, and character consistency across an entire script instead of treating each line in isolation. It lets you load an `.srt`, choose source and target languages, connect to a local or remote model endpoint, and monitor a live context layer that tracks scene information, glossary terms, unresolved ambiguities, and recurring character details as translation progresses in batches. The goal is to give you more control over subtitle quality, especially in dialogue-heavy content where tone, reference, and continuity matter.
 
-Current version: v0.1.0
+Current version: v0.2.0
 
 Current features:
 - drop or pick an `.srt` file

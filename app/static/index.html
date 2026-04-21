@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260420-16" />
+    <link rel="stylesheet" href="/static/app.css?v=20260421-4" />
   </head>
   <body>
     <main class="shell">
@@ -50,6 +50,24 @@
               <span class="secondary-file-label">Translated File for Review</span>
               <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
             </label>
+            <section class="reference-tracks-card">
+              <div class="reference-tracks-head">
+                <div>
+                  <div class="secondary-file-label">
+                    Reference Source Tracks
+                    <span
+                      class="info-dot"
+                      title="Optional supporting subtitle files in other languages. The primary source stays canonical; aligned reference tracks are used only as extra context when timestamps match well."
+                    >
+                      ?
+                    </span>
+                  </div>
+                  <div class="secondary-file-value">Example: English source + Spanish reference to help the model resolve ambiguity.</div>
+                </div>
+                <button type="button" id="add-reference-track-btn" class="ghost small">Add</button>
+              </div>
+              <div id="reference-tracks" class="reference-track-list"></div>
+            </section>
           </div>
 
           <div class="form-section">
@@ -116,7 +134,20 @@
                   <span class="label-row">Temperature <span class="info-dot" title="Controls randomness. Lower is more stable and consistent for translation. Higher can help with nuance, but also increases drift and inconsistent wording.">?</span></span>
                   <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.2" />
                 </label>
+                <label>
+                  <span class="label-row">Initial Card Input <span class="info-dot" title="How the first movie card is built. Auto uses full cleaned subtitle text if it fits your size cap, otherwise it falls back to a distributed sample across the whole file. Whole forces the full cleaned subtitle text. Sample always uses a capped distributed sample.">?</span></span>
+                  <select id="initial_card_strategy">
+                    <option value="auto">Auto</option>
+                    <option value="whole">Whole subtitle text</option>
+                    <option value="sample">Distributed sample</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="label-row">Initial Card Max Chars <span class="info-dot" title="Character budget used by Auto and Distributed sample modes when creating the first movie card. Higher gives more evidence, but weak local models may struggle. Whole subtitle mode ignores this cap and sends all cleaned subtitle text.">?</span></span>
+                  <input type="number" id="initial_card_max_chars" min="2000" max="200000" step="1000" value="24000" />
+                </label>
               </div>
+              <div id="initial-card-estimate" class="job-meta"></div>
               <label
                 class="checkbox checkbox-card"
                 title="Keeps a rolling card with scene context, characters, glossary, and ambiguities. Better consistency, but weak models may sometimes update it badly."
@@ -240,6 +271,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260420-16"></script>
+    <script src="/static/app.js?v=20260421-4"></script>
   </body>
   </html>

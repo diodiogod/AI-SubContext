@@ -13,12 +13,13 @@ from app.models import (
     JobLogEntry,
     JobStatus,
     QueuedLineRetranslation,
+    ReferenceSubtitleTrack,
     SessionContext,
     SubtitleLine,
     SubtitleValidationIssue,
     TranslationJob,
 )
-from app.srt_utils import chunk_lines, compose_translated_srt, parse_srt_text
+from app.srt_utils import align_reference_track, chunk_lines, compose_translated_srt, parse_srt_text
 from app.translator import OpenAICompatibleTranslator
 
 
@@ -127,6 +128,57 @@ class JobManager:
                 return line
         return None
 
+    def _build_reference_tracks(
+        self,
+        primary_lines: list[SubtitleLine],
+        reference_sources: list[dict[str, str]] | None = None,
+    ) -> list[ReferenceSubtitleTrack]:
+        tracks: list[ReferenceSubtitleTrack] = []
+        for source in reference_sources or []:
+            language = str(source.get("language") or "").strip()
+            content = str(source.get("content") or "")
+            filename = str(source.get("filename") or "reference.srt").strip() or "reference.srt"
+            if not language or not content:
+                continue
+            _, reference_lines = parse_srt_text(content)
+            tracks.append(
+                align_reference_track(
+                    primary_lines,
+                    reference_lines,
+                    filename=filename,
+                    language=language,
+                )
+            )
+        return tracks
+
+    def _reference_payload_for_positions(
+        self,
+        job: TranslationJob,
+        positions: list[int],
+    ) -> dict[int, list[dict[str, object]]]:
+        if not job.reference_tracks or not positions:
+            return {}
+
+        wanted = set(positions)
+        payload: dict[int, list[dict[str, object]]] = {}
+        for track in job.reference_tracks:
+            for match in track.aligned_lines:
+                if match.position not in wanted or not match.text.strip():
+                    continue
+                payload.setdefault(match.position, []).append(
+                    {
+                        "language": track.language,
+                        "filename": track.filename,
+                        "text": match.text,
+                        "confidence": round(float(match.confidence or 0.0), 4),
+                        "alignment_mode": track.alignment_mode,
+                    }
+                )
+
+        for references in payload.values():
+            references.sort(key=lambda item: float(item.get("confidence") or 0.0), reverse=True)
+        return payload
+
     def _record_batch_context_snapshot(
         self,
         job: TranslationJob,
@@ -181,6 +233,7 @@ class JobManager:
         status: str,
         translated_text: str,
         notes: list[str],
+        reason_codes: list[str] | None = None,
         batch_index: int | None = None,
     ) -> SubtitleValidationIssue:
         issue = None
@@ -211,6 +264,7 @@ class JobManager:
 
         issue.status = status
         issue.translated_text = translated_text
+        issue.reason_codes = list(reason_codes or [])
         issue.notes = notes
         issue.batch_index = batch_index
 
@@ -266,12 +320,10 @@ class JobManager:
         job = self.jobs.get(job_id)
         if not job:
             return None
-        generated = await self.translator.generate_context_from_lines(
+        generated = await self.translator.generate_context_from_full_subtitle(
             job.settings,
             job.original_lines,
             base_context=job.session_context,
-            scope_label="full subtitle file",
-            max_lines=300,
         )
         return generated
 
@@ -320,16 +372,20 @@ class JobManager:
         self._refresh_translated_srt(job)
         if resolution_mode == "resolve":
             notes = ["Confirmed as correct from the review panel."]
+            reason_codes = ["manual_fix"]
         elif resolution_mode == "remove":
             notes = ["Subtitle removed from the review panel."]
+            reason_codes = ["manual_fix", "missing_output"]
         else:
             notes = ["Manually updated from the review panel."]
+            reason_codes = ["manual_fix"]
         self._update_validation_issue(
             job,
             position,
             "manual_fixed",
             text,
             notes,
+            reason_codes=reason_codes,
         )
 
         if resolution_mode == "resolve":
@@ -419,6 +475,7 @@ class JobManager:
             source_line,
             translated_line,
             self._context_for_line(job, position),
+            reference_subtitles=self._reference_payload_for_positions(job, [position]).get(position, []),
             extra_instruction=extra_instruction,
             log_event=lambda level, message: self._append_log(job, level, message, save=False),
         )
@@ -432,7 +489,8 @@ class JobManager:
                     issue.status,
                     issue.translated_text,
                     list(issue.notes),
-                    issue.batch_index,
+                    reason_codes=list(issue.reason_codes),
+                    batch_index=issue.batch_index,
                 )
         job.validation_stats.retried_batches += 1
         if stats.issues:
@@ -493,16 +551,32 @@ class JobManager:
         title: str,
         original_srt: str,
         settings,
+        reference_sources: list[dict[str, str]] | None = None,
     ) -> TranslationJob:
         _, lines = parse_srt_text(original_srt)
+        reference_tracks = self._build_reference_tracks(lines, reference_sources)
         job = TranslationJob(
             filename=filename,
             title=title or filename.rsplit(".", 1)[0],
             settings=settings,
             original_srt=original_srt,
             original_lines=lines,
+            reference_tracks=reference_tracks,
         )
         self._append_log(job, "info", f"Job created for {filename}", save=False)
+        if reference_tracks:
+            self._append_log(job, "info", f"Loaded {len(reference_tracks)} reference subtitle track(s)", save=False)
+            for track in reference_tracks:
+                self._append_log(
+                    job,
+                    "info",
+                    (
+                        f"Reference {track.language} ({track.filename}) aligned "
+                        f"{track.matched_lines}/{len(lines)} primary lines "
+                        f"with average confidence {track.average_confidence:.2f} via {track.alignment_mode}"
+                    ),
+                    save=False,
+                )
         self.jobs[job.id] = job
         self._save_state()
         self._start_task(job.id)
@@ -516,9 +590,11 @@ class JobManager:
         source_srt: str,
         translated_srt: str,
         settings,
+        reference_sources: list[dict[str, str]] | None = None,
     ) -> TranslationJob:
         _, source_lines = parse_srt_text(source_srt)
         _, translated_lines = parse_srt_text(translated_srt)
+        reference_tracks = self._build_reference_tracks(source_lines, reference_sources)
         job = TranslationJob(
             filename=translated_filename,
             title=title or translated_filename.rsplit(".", 1)[0],
@@ -528,6 +604,7 @@ class JobManager:
             original_lines=source_lines,
             translated_srt=translated_srt,
             translated_lines=translated_lines,
+            reference_tracks=reference_tracks,
         )
         self._append_log(
             job,
@@ -535,6 +612,19 @@ class JobManager:
             f"Validation review created for {translated_filename} against source {source_filename}",
             save=False,
         )
+        if reference_tracks:
+            self._append_log(job, "info", f"Loaded {len(reference_tracks)} reference subtitle track(s)", save=False)
+            for track in reference_tracks:
+                self._append_log(
+                    job,
+                    "info",
+                    (
+                        f"Reference {track.language} ({track.filename}) aligned "
+                        f"{track.matched_lines}/{len(source_lines)} primary lines "
+                        f"with average confidence {track.average_confidence:.2f} via {track.alignment_mode}"
+                    ),
+                    save=False,
+                )
         self.jobs[job.id] = job
         self._save_state()
         self._start_task(job.id)
@@ -657,10 +747,12 @@ class JobManager:
                     batch_index=batch_index + 1,
                     save=False,
                 )
+                batch_positions = [line.position for line in batches[batch_index]]
                 translated_batch, updated_context, batch_stats = await self.translator.translate_batch(
                     job.settings,
                     batches[batch_index],
                     current_context,
+                    reference_subtitles_by_position=self._reference_payload_for_positions(job, batch_positions),
                     batch_index=batch_index + 1,
                     log_event=lambda level, message, batch_no=batch_index + 1: self._append_log(
                         job,

@@ -81,6 +81,53 @@ class BatchProcessingStats:
 
 LogEvent = Callable[[str, str], None]
 
+_META_STYLE_NOTE_PATTERNS = (
+    "prefer unknown",
+    "infer only stable facts",
+    "return json",
+    "compact format",
+    "source language",
+    "target language",
+    "translation of",
+    "subtitle translation",
+    "literal translation",
+    "preserve line breaks",
+)
+
+_META_CONTEXT_PATTERNS = (
+    "translation of",
+    "subtitle translation",
+    "opening credits",
+    "song lyrics",
+    "translation card",
+    "context card",
+    "movie card",
+    "subtitle file",
+)
+
+_META_LANGUAGE_MARKERS = (
+    "english",
+    "spanish",
+    "portuguese",
+    "french",
+    "german",
+    "italian",
+    "japanese",
+    "chinese",
+    "korean",
+    "russian",
+    "pt-br",
+    "pt br",
+    "en",
+    "es",
+    "fr",
+    "de",
+    "ja",
+    "zh",
+    "ko",
+    "ru",
+)
+
 
 def _extract_message_text(payload: dict[str, Any]) -> str:
     choices = payload.get("choices") or []
@@ -112,6 +159,138 @@ def _extract_json_blob(text: str) -> dict[str, Any]:
     if start == -1 or end == -1 or end < start:
         raise ValueError("No JSON object found in model response")
     return json.loads(text[start:end + 1])
+
+
+def _clean_subtitle_block_text(value: str) -> str:
+    parts = [" ".join(part.split()) for part in str(value or "").splitlines()]
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _subtitle_text_blocks(lines: list[SubtitleLine]) -> list[str]:
+    return [block for block in (_clean_subtitle_block_text(line.text) for line in lines) if block]
+
+
+def _join_blocks_until_limit(blocks: list[str], char_limit: int) -> str:
+    if char_limit <= 0:
+        return "\n".join(blocks).strip()
+
+    parts: list[str] = []
+    used = 0
+    for block in blocks:
+        separator = 1 if parts else 0
+        cost = len(block) + separator
+        if parts and used + cost > char_limit:
+            break
+        if not parts and len(block) > char_limit:
+            return block[:char_limit].strip()
+        if parts:
+            parts.append("\n")
+        parts.append(block)
+        used += cost
+    return "".join(parts).strip()
+
+
+def _distributed_sample_blocks(blocks: list[str], char_limit: int) -> str:
+    if not blocks:
+        return ""
+    full_text = "\n".join(blocks).strip()
+    if char_limit <= 0 or len(full_text) <= char_limit:
+        return full_text
+
+    segment_count = min(5, max(3, len(blocks) // 160 + 1))
+    segment_count = max(1, segment_count)
+    window_size = max(24, min(120, len(blocks) // max(1, segment_count)))
+    per_segment_limit = max(600, char_limit // segment_count)
+
+    ranges: list[tuple[int, int]] = []
+    last_end = 0
+    for index in range(segment_count):
+        if segment_count == 1:
+            center = 0
+        else:
+            center = round(index * (len(blocks) - 1) / (segment_count - 1))
+        start = max(last_end, min(max(0, center - (window_size // 2)), max(0, len(blocks) - window_size)))
+        end = min(len(blocks), start + window_size)
+        if end <= start:
+            continue
+        ranges.append((start, end))
+        last_end = end
+
+    segments: list[str] = []
+    for start, end in ranges:
+        segment = _join_blocks_until_limit(blocks[start:end], per_segment_limit)
+        if segment:
+            segments.append(segment)
+
+    sampled_text = "\n\n...\n\n".join(segments).strip()
+    if len(sampled_text) <= char_limit:
+        return sampled_text
+    return sampled_text[:char_limit].rsplit("\n", 1)[0].strip()
+
+
+def _build_full_subtitle_card_payload(
+    settings: TranslationSettings,
+    lines: list[SubtitleLine],
+) -> dict[str, Any]:
+    blocks = _subtitle_text_blocks(lines)
+    full_text = "\n".join(blocks).strip()
+    full_chars = len(full_text)
+    requested_strategy = getattr(settings, "initial_card_strategy", "auto")
+    max_chars = int(getattr(settings, "initial_card_max_chars", 24000) or 24000)
+
+    if requested_strategy == "whole":
+        strategy_used = "whole"
+        subtitle_text = full_text
+    elif requested_strategy == "sample":
+        strategy_used = "sample"
+        subtitle_text = _distributed_sample_blocks(blocks, max_chars)
+    else:
+        if full_chars <= max_chars:
+            strategy_used = "whole"
+            subtitle_text = full_text
+        else:
+            strategy_used = "sample"
+            subtitle_text = _distributed_sample_blocks(blocks, max_chars)
+
+    return {
+        "requested_strategy": requested_strategy,
+        "strategy_used": strategy_used,
+        "subtitle_text": subtitle_text,
+        "full_text_char_count": full_chars,
+        "used_text_char_count": len(subtitle_text),
+        "total_subtitle_blocks": len(blocks),
+    }
+
+
+def _looks_like_meta_context_text(value: str) -> bool:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+
+    if lowered.startswith("movie:") or lowered.startswith("title:"):
+        return True
+    if any(pattern in lowered for pattern in _META_CONTEXT_PATTERNS):
+        return True
+    if (
+        ("subtitle" in lowered or "subtitles" in lowered or "translation" in lowered or "translated" in lowered)
+        and any(marker in lowered for marker in _META_LANGUAGE_MARKERS)
+    ):
+        return True
+    if " for " in lowered and ("subtitle" in lowered or "subtitles" in lowered):
+        return True
+    if "source language" in lowered or "target language" in lowered:
+        return True
+    return False
+
+
+def _sanitize_context_scalar(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if _looks_like_meta_context_text(normalized):
+        return ""
+    return normalized
 
 
 def _schema_payload(name: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -214,7 +393,7 @@ def merge_session_context(current: SessionContext | None, update: dict[str, Any]
     for scalar_key in ("premise", "tone", "scene_context"):
         value = (update or {}).get(scalar_key)
         if isinstance(value, str) and value.strip():
-            base[scalar_key] = value.strip()
+            base[scalar_key] = _sanitize_context_scalar(value)
 
     for list_key in ("style_notes", "unresolved_ambiguities"):
         values = (update or {}).get(list_key) or []
@@ -254,7 +433,28 @@ def merge_session_context(current: SessionContext | None, update: dict[str, Any]
         }
     base["glossary"] = list(glossary_by_term.values())[:24]
 
-    return SessionContext(**base)
+    context = SessionContext(**base)
+
+    cleaned_style_notes: list[str] = []
+    for note in context.style_notes:
+        normalized = note.strip()
+        lowered = normalized.casefold()
+        if not normalized:
+            continue
+        if any(pattern in lowered for pattern in _META_STYLE_NOTE_PATTERNS):
+            continue
+        if _looks_like_meta_context_text(normalized):
+            continue
+        if normalized not in cleaned_style_notes:
+            cleaned_style_notes.append(normalized)
+    context.style_notes = cleaned_style_notes[:12]
+
+    for field_name in ("premise", "tone", "scene_context"):
+        value = getattr(context, field_name, "").strip()
+        if value and _looks_like_meta_context_text(value):
+            setattr(context, field_name, "")
+
+    return context
 
 
 def _normalize_language_code(value: str | None) -> str:
@@ -403,13 +603,54 @@ def _validation_notes(
     return notes
 
 
+def _reason_codes_for_line(
+    settings: TranslationSettings,
+    source_text: str,
+    translated_text: str,
+    validation: BatchValidationResult | None = None,
+    *,
+    status: str = "suspect",
+    extra_codes: list[str] | None = None,
+) -> list[str]:
+    codes: list[str] = list(extra_codes or [])
+    source = _normalize_text(source_text)
+    translated = _normalize_text(translated_text)
+    source_code = _normalize_language_code(settings.source_language)
+
+    if not translated:
+        codes.append("missing_output")
+    elif len(source) >= 8 and source.casefold() == translated.casefold():
+        codes.append("unchanged_from_source")
+    elif _line_looks_untranslated(source, translated):
+        codes.append("source_language_leak")
+
+    if validation and validation.detected_language and validation.detected_language == source_code:
+        codes.append("validator_language_mismatch")
+        if translated:
+            codes.append("source_language_leak")
+
+    if status == "auto_fixed":
+        codes.append("retry_fixed")
+    elif status == "manual_fixed":
+        codes.append("manual_fix")
+
+    unique: list[str] = []
+    for code in codes:
+        if code and code not in unique:
+            unique.append(code)
+    return unique or ["other"]
+
+
 def _build_validation_issues(
+    settings: TranslationSettings,
     status: str,
     positions: list[int],
     batch_lines: list[SubtitleLine],
     translated_lines: list[SubtitleLine],
     batch_index: int | None,
     notes: list[str],
+    validation: BatchValidationResult | None = None,
+    extra_codes: list[str] | None = None,
 ) -> list[SubtitleValidationIssue]:
     source_by_position = {line.position: line.text for line in batch_lines}
     translated_by_position = {line.position: line.text for line in translated_lines}
@@ -419,6 +660,14 @@ def _build_validation_issues(
             status=status,
             source_text=source_by_position.get(position, ""),
             translated_text=translated_by_position.get(position, ""),
+            reason_codes=_reason_codes_for_line(
+                settings,
+                source_by_position.get(position, ""),
+                translated_by_position.get(position, ""),
+                validation,
+                status=status,
+                extra_codes=extra_codes,
+            ),
             notes=notes,
             batch_index=batch_index,
         )
@@ -643,12 +892,18 @@ class OpenAICompatibleTranslator:
         settings: TranslationSettings,
         lines: list[SubtitleLine],
     ) -> SessionContext:
-        snippet = [{"position": line.position, "text": line.text} for line in lines[:300]]
+        subtitle_payload = _build_full_subtitle_card_payload(settings, lines)
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are preparing a compact movie subtitle translation card. "
+                    "Use only evidence from the provided cleaned subtitle text. "
+                    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
+                    "Do not describe the translation task itself. "
+                    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
+                    "Premise must describe the story or setup only when the evidence is strong enough; otherwise leave it empty. "
+                    "Style notes must describe real narrative, dialog, register, or recurring linguistic traits from the subtitle text, not generic instructions. "
                     "Infer only stable facts. Prefer unknown over guessing."
                 ),
             },
@@ -659,7 +914,12 @@ class OpenAICompatibleTranslator:
                         "title": settings.title,
                         "source_language": settings.source_language,
                         "target_language": settings.target_language,
-                        "lines": snippet,
+                        "initial_card_strategy_requested": subtitle_payload["requested_strategy"],
+                        "initial_card_strategy_used": subtitle_payload["strategy_used"],
+                        "full_text_char_count": subtitle_payload["full_text_char_count"],
+                        "used_text_char_count": subtitle_payload["used_text_char_count"],
+                        "total_subtitle_blocks": subtitle_payload["total_subtitle_blocks"],
+                        "subtitle_text": subtitle_payload["subtitle_text"],
                     },
                     ensure_ascii=False,
                 ),
@@ -675,6 +935,54 @@ class OpenAICompatibleTranslator:
             data,
         )
         return merged
+
+    async def generate_context_from_full_subtitle(
+        self,
+        settings: TranslationSettings,
+        lines: list[SubtitleLine],
+        base_context: SessionContext | None = None,
+    ) -> SessionContext:
+        subtitle_payload = _build_full_subtitle_card_payload(settings, lines)
+        base = deepcopy(base_context) if base_context else SessionContext(
+            movie_title=settings.title,
+            source_language=settings.source_language,
+            target_language=settings.target_language,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are refreshing a compact subtitle translation context card from cleaned subtitle text covering the whole title. "
+                    "Use the existing card as a base, revise only with evidence from the provided text, and prefer unknown over guessing. "
+                    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
+                    "Do not describe the translation task itself. "
+                    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
+                    "Keep premise for stable whole-title facts only. "
+                    "Return JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "title": settings.title,
+                        "source_language": settings.source_language,
+                        "target_language": settings.target_language,
+                        "scope": "full subtitle file",
+                        "existing_context": base.model_dump(),
+                        "initial_card_strategy_requested": subtitle_payload["requested_strategy"],
+                        "initial_card_strategy_used": subtitle_payload["strategy_used"],
+                        "full_text_char_count": subtitle_payload["full_text_char_count"],
+                        "used_text_char_count": subtitle_payload["used_text_char_count"],
+                        "total_subtitle_blocks": subtitle_payload["total_subtitle_blocks"],
+                        "subtitle_text": subtitle_payload["subtitle_text"],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        data = await self._chat_json(settings, messages, "session_context_refresh", _session_context_schema())
+        return merge_session_context(base, data)
 
     async def generate_context_from_lines(
         self,
@@ -769,6 +1077,13 @@ class OpenAICompatibleTranslator:
                         status="suspect",
                         source_text=source_by_position.get(position, ""),
                         translated_text=translated_by_position.get(position, ""),
+                        reason_codes=_reason_codes_for_line(
+                            settings,
+                            source_by_position.get(position, ""),
+                            translated_by_position.get(position, ""),
+                            validation,
+                            status="suspect",
+                        ),
                         notes=notes,
                         batch_index=batch_number,
                     )
@@ -787,6 +1102,7 @@ class OpenAICompatibleTranslator:
                         status="error",
                         source_text=source_line.text,
                         translated_text="",
+                        reason_codes=["missing_output"],
                         notes=["Missing translated subtitle for this source line."],
                     )
                 )
@@ -798,6 +1114,7 @@ class OpenAICompatibleTranslator:
                         status="error",
                         source_text="",
                         translated_text=translated_line.text,
+                        reason_codes=["extra_output"],
                         notes=["Translated file has extra subtitle lines beyond the source file."],
                     )
                 )
@@ -809,6 +1126,7 @@ class OpenAICompatibleTranslator:
         settings: TranslationSettings,
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
+        reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         extra_instruction: str = "",
     ) -> tuple[list[SubtitleLine], SessionContext | None]:
         system_instruction = (
@@ -816,6 +1134,9 @@ class OpenAICompatibleTranslator:
             "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
             "Return JSON only. Also return a compact state_update for future batches. "
             "Use character gender only as a grammar hint and prefer unknown over guessing. "
+            "The primary subtitle text is always the canonical source. "
+            "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
+            "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
             "For state_update: keep premise as stable whole-title context, but make scene_context specific to the current batch only. "
             "Do not repeat a broad movie synopsis in scene_context if the current lines are about a narrower exchange, location, or action beat."
         )
@@ -823,6 +1144,16 @@ class OpenAICompatibleTranslator:
             system_instruction += " " + extra_instruction
 
         context_payload = session_context.model_dump() if session_context else {}
+        line_payload = []
+        for line in batch_lines:
+            item = {
+                "position": line.position,
+                "text": line.text,
+            }
+            references = (reference_subtitles_by_position or {}).get(line.position) or []
+            if references:
+                item["reference_subtitles"] = references
+            line_payload.append(item)
         messages = [
             {
                 "role": "system",
@@ -836,7 +1167,7 @@ class OpenAICompatibleTranslator:
                         "source_language": settings.source_language,
                         "target_language": settings.target_language,
                         "session_context": context_payload,
-                        "lines": [{"position": line.position, "text": line.text} for line in batch_lines],
+                        "lines": line_payload,
                     },
                     ensure_ascii=False,
                 ),
@@ -862,6 +1193,7 @@ class OpenAICompatibleTranslator:
         source_line: SubtitleLine,
         current_translation: SubtitleLine | None,
         session_context: SessionContext | None,
+        reference_subtitles: list[dict[str, Any]] | None = None,
         extra_instruction: str = "",
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
@@ -869,6 +1201,8 @@ class OpenAICompatibleTranslator:
         system_instruction = (
             "You are revising a single subtitle line translation. "
             "Use the source text, current translation, and session context to produce the best final target-language line. "
+            "If reference_subtitles are present, treat them as supporting aligned subtitle references from other languages. "
+            "The source_text remains canonical. "
             "Return only JSON."
         )
         if extra_instruction.strip():
@@ -891,6 +1225,7 @@ class OpenAICompatibleTranslator:
                             "position": source_line.position,
                             "source_text": source_line.text,
                             "current_translation": current_translation.text if current_translation else "",
+                            "reference_subtitles": reference_subtitles or [],
                         },
                     },
                     ensure_ascii=False,
@@ -916,12 +1251,14 @@ class OpenAICompatibleTranslator:
                 suspicious_count=len(flagged_positions),
                 error_count=len(flagged_positions),
                 issues=_build_validation_issues(
+                    settings,
                     "error",
                     flagged_positions,
                     [source_line],
                     [revised_line],
                     batch_index,
                     notes,
+                    validation=validation,
                 ),
             )
 
@@ -933,12 +1270,14 @@ class OpenAICompatibleTranslator:
         return revised_line, BatchProcessingStats(
             fixed_count=1,
             issues=_build_validation_issues(
+                settings,
                 "auto_fixed",
                 [source_line.position],
                 [source_line],
                 [revised_line],
                 batch_index,
                 notes,
+                extra_codes=["manual_retranslation"],
             ),
         )
 
@@ -949,6 +1288,7 @@ class OpenAICompatibleTranslator:
         translated_lines: list[SubtitleLine],
         session_context: SessionContext | None,
         suspicious_positions: list[int],
+        reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
     ) -> tuple[list[SubtitleLine], BatchProcessingStats]:
@@ -973,6 +1313,7 @@ class OpenAICompatibleTranslator:
                 settings,
                 [source_line],
                 session_context,
+                reference_subtitles_by_position=reference_subtitles_by_position,
                 extra_instruction=(
                     _STRICT_RETRY_INSTRUCTION
                     + " Focus only on this subtitle line and translate it fully into the target language."
@@ -987,12 +1328,14 @@ class OpenAICompatibleTranslator:
                 notes = _validation_notes(retried_validation, settings, flagged_positions)
                 repair_stats.issues.extend(
                     _build_validation_issues(
+                        settings,
                         "error",
                         flagged_positions,
                         [source_line],
                         [retried_line],
                         batch_index,
                         notes,
+                        validation=retried_validation,
                     )
                 )
                 if log_event:
@@ -1005,12 +1348,14 @@ class OpenAICompatibleTranslator:
                 translated_by_position[position] = retried_line
                 repair_stats.issues.extend(
                     _build_validation_issues(
+                        settings,
                         "auto_fixed",
                         [position],
                         [source_line],
                         [retried_line],
                         batch_index,
                         ["Validation cleared after isolated retry."],
+                        extra_codes=["isolated_retry"],
                     )
                 )
                 if log_event:
@@ -1023,6 +1368,7 @@ class OpenAICompatibleTranslator:
         settings: TranslationSettings,
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
+        reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         depth: int = 0,
@@ -1042,6 +1388,7 @@ class OpenAICompatibleTranslator:
                 settings,
                 batch_lines,
                 session_context,
+                reference_subtitles_by_position=reference_subtitles_by_position,
                 extra_instruction=extra_instruction,
             )
             validation = _validate_translated_batch(settings, batch_lines, translated_lines)
@@ -1067,6 +1414,7 @@ class OpenAICompatibleTranslator:
                         translated_lines,
                         merged_context,
                         flagged_positions,
+                        reference_subtitles_by_position=reference_subtitles_by_position,
                         batch_index=batch_index,
                         log_event=log_event,
                     )
@@ -1078,12 +1426,14 @@ class OpenAICompatibleTranslator:
                         fixed_count=len(first_failed_positions),
                         retried_batches=1,
                         issues=_build_validation_issues(
+                            settings,
                             "auto_fixed",
                             first_failed_positions,
                             batch_lines,
                             translated_lines,
                             batch_index,
                             notes,
+                            validation=validation,
                         ),
                     )
                 return translated_lines, merged_context, BatchProcessingStats()
@@ -1105,6 +1455,7 @@ class OpenAICompatibleTranslator:
                 settings,
                 first_half,
                 session_context,
+                reference_subtitles_by_position=reference_subtitles_by_position,
                 batch_index=batch_index,
                 log_event=log_event,
                 depth=depth + 1,
@@ -1113,6 +1464,7 @@ class OpenAICompatibleTranslator:
                 settings,
                 second_half,
                 context_after_first,
+                reference_subtitles_by_position=reference_subtitles_by_position,
                 batch_index=batch_index,
                 log_event=log_event,
                 depth=depth + 1,
@@ -1134,12 +1486,14 @@ class OpenAICompatibleTranslator:
                 error_count=len(flagged_positions),
                 retried_batches=1,
                 issues=_build_validation_issues(
+                    settings,
                     "error",
                     flagged_positions,
                     batch_lines,
                     last_translated,
                     batch_index,
                     notes,
+                    validation=last_validation,
                 ),
             )
         raise ValueError(f"Batch validation failed: {last_validation.reason or 'unknown validation failure'}")
@@ -1149,6 +1503,7 @@ class OpenAICompatibleTranslator:
         settings: TranslationSettings,
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
+        reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
@@ -1156,6 +1511,7 @@ class OpenAICompatibleTranslator:
             settings,
             batch_lines,
             session_context,
+            reference_subtitles_by_position=reference_subtitles_by_position,
             batch_index=batch_index,
             log_event=log_event,
         )

@@ -31,6 +31,9 @@ const dropZone = document.getElementById("drop-zone");
 const translatedDropZone = document.getElementById("translated-drop-zone");
 const selectedFile = document.getElementById("selected-file");
 const selectedTranslatedFile = document.getElementById("selected-translated-file");
+const referenceTracksCard = document.querySelector(".reference-tracks-card");
+const referenceTracksEl = document.getElementById("reference-tracks");
+const addReferenceTrackBtn = document.getElementById("add-reference-track-btn");
 const modelInput = document.getElementById("model");
 const modelHistory = document.getElementById("model-history");
 const modelSelect = document.getElementById("model-select");
@@ -39,6 +42,9 @@ const modelListStatus = document.getElementById("model-list-status");
 const testConnectionBtn = document.getElementById("test-connection-btn");
 const reviewExistingBtn = document.getElementById("review-existing-btn");
 const connectionTestResult = document.getElementById("connection-test-result");
+const initialCardStrategyInput = document.getElementById("initial_card_strategy");
+const initialCardMaxCharsInput = document.getElementById("initial_card_max_chars");
+const initialCardEstimate = document.getElementById("initial-card-estimate");
 
 let editingJobId = null;
 let openLogJobId = null;
@@ -50,6 +56,9 @@ let remoteModelOptions = [];
 const reviewDrafts = new Map();
 const reviewInstructionDrafts = new Map();
 const contextEditorDrafts = new Map();
+let referenceTrackCounter = 0;
+let initialCardEstimateToken = 0;
+let sourceSubtitleTextStats = null;
 
 function escapeHtml(value) {
   return String(value)
@@ -101,6 +110,71 @@ function splitListText(value) {
     .split(/\r?\n/)
     .map(item => item.trim())
     .filter(Boolean);
+}
+
+function extractSubtitleTextFromSrt(content) {
+  return String(content || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line && !/^\d+$/.test(line) && !/^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$/.test(line))
+    .join("\n")
+    .trim();
+}
+
+function estimateTokensFromChars(charCount) {
+  const numeric = Number(charCount) || 0;
+  return Math.max(0, Math.round(numeric / 4));
+}
+
+async function refreshInitialCardEstimate() {
+  if (!initialCardEstimate) return;
+  const currentToken = ++initialCardEstimateToken;
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) {
+    sourceSubtitleTextStats = null;
+    initialCardEstimate.textContent = "Initial card input estimate appears after you load a source subtitle.";
+    initialCardEstimate.style.color = "var(--muted)";
+    return;
+  }
+
+  if (!sourceSubtitleTextStats || sourceSubtitleTextStats.name !== file.name || sourceSubtitleTextStats.size !== file.size || sourceSubtitleTextStats.lastModified !== file.lastModified) {
+    const content = await file.text();
+    if (currentToken !== initialCardEstimateToken) return;
+    const cleaned = extractSubtitleTextFromSrt(content);
+    sourceSubtitleTextStats = {
+      name: file.name,
+      size: file.size,
+      lastModified: file.lastModified,
+      cleanedChars: cleaned.length,
+      estimatedTokens: estimateTokensFromChars(cleaned.length),
+    };
+  }
+
+  const stats = sourceSubtitleTextStats;
+  const strategy = String(initialCardStrategyInput?.value || "auto");
+  const maxChars = Math.max(2000, Number(initialCardMaxCharsInput?.value || 24000) || 24000);
+  if (!stats) {
+    initialCardEstimate.textContent = "Initial card input estimate appears after you load a source subtitle.";
+    initialCardEstimate.style.color = "var(--muted)";
+    return;
+  }
+
+  const fullChars = stats.cleanedChars;
+  const fullTokens = stats.estimatedTokens;
+  let summary = `Cleaned subtitle text: ~${fullChars.toLocaleString()} chars (~${fullTokens.toLocaleString()} tokens). `;
+  if (strategy === "whole") {
+    summary += "Whole subtitle mode will send all cleaned subtitle text.";
+  } else if (strategy === "sample") {
+    summary += `Distributed sample mode will cap input near ${maxChars.toLocaleString()} chars (~${estimateTokensFromChars(maxChars).toLocaleString()} tokens).`;
+  } else if (fullChars <= maxChars) {
+    summary += "Auto mode will send the whole cleaned subtitle text.";
+  } else {
+    summary += `Auto mode will sample the subtitle down to about ${maxChars.toLocaleString()} chars (~${estimateTokensFromChars(maxChars).toLocaleString()} tokens).`;
+  }
+
+  initialCardEstimate.textContent = summary;
+  initialCardEstimate.style.color = (strategy === "whole" && fullChars > maxChars * 1.5) ? "var(--accent-2)" : "var(--muted)";
 }
 
 function scopeDraftKey(scope, jobId, batchIndex = "") {
@@ -229,11 +303,136 @@ function collectSettingsPayload() {
 function updateSelectedFileLabel() {
   const file = fileInput.files && fileInput.files[0];
   selectedFile.textContent = file ? file.name : "No file selected";
+  if (!file) {
+    sourceSubtitleTextStats = null;
+  }
+  void refreshInitialCardEstimate();
 }
 
 function updateSelectedTranslatedFileLabel() {
   const file = translatedFileInput.files && translatedFileInput.files[0];
   selectedTranslatedFile.innerHTML = file ? escapeHtml(file.name) : `Optional second <code>.srt</code>`;
+}
+
+function renderReferenceTrackEmptyState() {
+  if (!referenceTracksEl) return;
+  const hasRows = referenceTracksEl.querySelector(".reference-track-row");
+  const emptyState = referenceTracksEl.querySelector(".reference-track-empty");
+  if (hasRows) {
+    emptyState?.remove();
+    return;
+  }
+  if (!emptyState) {
+    referenceTracksEl.innerHTML = `<div class="reference-track-empty">Drop supporting .srt files here or click Add.</div>`;
+  }
+}
+
+function updateReferenceTrackLabel(row) {
+  if (!row) return;
+  const fileInputEl = row.querySelector("[data-reference-file]");
+  const valueEl = row.querySelector("[data-reference-file-name]");
+  const file = fileInputEl?.files && fileInputEl.files[0];
+  if (!valueEl) return;
+  valueEl.textContent = file ? file.name : "Choose supporting .srt";
+}
+
+function addReferenceTrackRow(language = "") {
+  if (!referenceTracksEl) return;
+  referenceTracksEl.querySelector(".reference-track-empty")?.remove();
+  const trackId = `reference-track-${referenceTrackCounter++}`;
+  referenceTracksEl.insertAdjacentHTML("beforeend", `
+    <div class="reference-track-row" data-reference-row="${escapeHtml(trackId)}">
+      <label>
+        <span class="label-row">Language</span>
+        <input type="text" data-reference-language value="${escapeHtml(language)}" placeholder="es, fr, ja..." />
+      </label>
+      <label class="secondary-file reference-track-picker" data-reference-picker="true" title="Optional supporting subtitle file used only as aligned context during translation.">
+        <input type="file" data-reference-file accept=".srt" hidden />
+        <span class="secondary-file-label">Reference Subtitle</span>
+        <span class="secondary-file-value" data-reference-file-name>Choose supporting .srt</span>
+      </label>
+      <div class="reference-track-actions">
+        <button type="button" class="ghost small" data-reference-remove="true">Remove</button>
+      </div>
+    </div>
+  `);
+  const row = referenceTracksEl.lastElementChild;
+  const input = row?.querySelector("[data-reference-file]");
+  const picker = row?.querySelector("[data-reference-picker]");
+  if (picker && input) {
+    bindDropZone(picker, input);
+  }
+  renderReferenceTrackEmptyState();
+  return row;
+}
+
+function removeReferenceTrackRow(button) {
+  const row = button?.closest(".reference-track-row");
+  if (!row) return;
+  row.remove();
+  renderReferenceTrackEmptyState();
+}
+
+function collectReferenceTracks() {
+  if (!referenceTracksEl) return [];
+  const rows = [...referenceTracksEl.querySelectorAll(".reference-track-row")];
+  const tracks = [];
+  for (const row of rows) {
+    const language = row.querySelector("[data-reference-language]")?.value?.trim() || "";
+    const file = row.querySelector("[data-reference-file]")?.files?.[0] || null;
+    if (!language && !file) continue;
+    if (!language || !file) {
+      alert("Each reference track needs both a language code and a subtitle file.");
+      return null;
+    }
+    tracks.push({ language, file });
+  }
+  return tracks;
+}
+
+function resetReferenceTrackRows() {
+  if (!referenceTracksEl) return;
+  referenceTracksEl.innerHTML = "";
+  renderReferenceTrackEmptyState();
+}
+
+function emptyReferenceTrackRows() {
+  if (!referenceTracksEl) return [];
+  return [...referenceTracksEl.querySelectorAll(".reference-track-row")]
+    .filter(row => !(row.querySelector("[data-reference-file]")?.files?.[0]));
+}
+
+function attachReferenceFileToRow(row, file) {
+  if (!row || !file) return;
+  const input = row.querySelector("[data-reference-file]");
+  if (!input) return;
+  setInputFile(input, file);
+  updateReferenceTrackLabel(row);
+}
+
+function addReferenceTracksFromFiles(files) {
+  const droppedFiles = [...(files || [])];
+  if (!droppedFiles.length) return;
+  const invalid = droppedFiles.filter(file => !String(file?.name || "").toLowerCase().endsWith(".srt"));
+  if (invalid.length) {
+    alert("Only .srt files are supported.");
+    return;
+  }
+
+  const availableRows = emptyReferenceTrackRows();
+  let firstCreatedOrFilledRow = null;
+  for (const file of droppedFiles) {
+    const row = availableRows.shift() || addReferenceTrackRow();
+    attachReferenceFileToRow(row, file);
+    if (!firstCreatedOrFilledRow) {
+      firstCreatedOrFilledRow = row;
+    }
+  }
+
+  const languageInput = firstCreatedOrFilledRow?.querySelector("[data-reference-language]");
+  if (languageInput && !String(languageInput.value || "").trim()) {
+    languageInput.focus();
+  }
 }
 
 function statusBadge(status) {
@@ -254,6 +453,35 @@ function formatTimestamp(value) {
     minute: "2-digit",
     second: "2-digit",
   }).format(date);
+}
+
+function formatConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0%";
+  return `${Math.round(Math.max(0, Math.min(1, numeric)) * 100)}%`;
+}
+
+function renderReferenceTrackSummary(track, compact = false) {
+  if (!track) return "";
+  const language = String(track.language || "").trim() || "ref";
+  const filename = String(track.filename || "reference.srt").trim() || "reference.srt";
+  const matched = Number(track.matched_lines || 0);
+  const total = Number(track.total_lines || 0);
+  const average = formatConfidence(track.average_confidence);
+  const mode = String(track.alignment_mode || "timestamp");
+  return `
+    <div class="reference-track-summary ${compact ? "compact" : ""}">
+      <div class="reference-track-summary-head">
+        <span class="job-fact">${escapeHtml(language)}</span>
+        <span class="job-meta">${escapeHtml(filename)}</span>
+      </div>
+      <div class="reference-track-summary-meta">
+        <span class="job-fact">Match ${escapeHtml(String(matched))}/${escapeHtml(String(total))}</span>
+        <span class="job-fact">Avg ${escapeHtml(average)}</span>
+        <span class="job-fact">${escapeHtml(mode)}</span>
+      </div>
+    </div>
+  `;
 }
 
 function hasBatchIndex(value) {
@@ -707,6 +935,8 @@ function renderJobs(jobs) {
       const sourceLanguage = escapeHtml(job?.settings?.source_language || "n/a");
       const targetLanguage = escapeHtml(job?.settings?.target_language || "n/a");
       const model = escapeHtml(job?.settings?.model || "No model");
+      const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
+      const referenceLanguages = referenceTracks.map(track => String(track?.language || "").trim()).filter(Boolean);
       const kind = job?.job_kind === "review" ? "Validation Review" : "Translation";
       const message = escapeHtml(job.message || "Waiting for update.");
       const logCount = Array.isArray(job.logs) ? job.logs.length : 0;
@@ -732,6 +962,7 @@ function renderJobs(jobs) {
             <span class="job-fact">${escapeHtml(kind)}</span>
             <span class="job-fact">${sourceLanguage} → ${targetLanguage}</span>
             <span class="job-fact">${model}</span>
+            ${referenceLanguages.length ? `<span class="job-fact">Refs ${escapeHtml(referenceLanguages.join(", "))}</span>` : ""}
             <span class="job-fact">Progress ${progress}</span>
             ${(validation.suspicious_subtitles || fixedTotal || validation.error_subtitles) ? `
               <span class="job-fact">Suspect ${escapeHtml(String(validation.suspicious_subtitles || 0))}</span>
@@ -740,6 +971,11 @@ function renderJobs(jobs) {
             ` : ""}
           </div>
           <div class="job-meta">${message}</div>
+          ${referenceTracks.length ? `
+            <div class="reference-track-summary-list">
+              ${referenceTracks.map(track => renderReferenceTrackSummary(track, true)).join("")}
+            </div>
+          ` : ""}
         </div>
         <div class="job-actions">
           <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Inspect flagged subtitle lines and save manual fixes." ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
@@ -763,8 +999,9 @@ function renderLogDialog(job) {
   const title = job.title || job.filename || "Job";
   const logs = Array.isArray(job.logs) ? job.logs : [];
   const issues = Array.isArray(job.validation_issues) ? job.validation_issues : [];
+  const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
   logDialogTitle.textContent = `${title} Log`;
-  if (!logs.length && !issues.length) {
+  if (!logs.length && !issues.length && !referenceTracks.length) {
     logDialogBody.innerHTML = `<p class="job-meta">No verbose events yet.</p>`;
     return;
   }
@@ -788,6 +1025,14 @@ function renderLogDialog(job) {
       }).join("")}
       </div>
     </div>
+    ${referenceTracks.length ? `
+      <div class="log-section">
+        <div class="mini-eyebrow">Reference Track Alignment</div>
+        <div class="reference-track-summary-list">
+          ${referenceTracks.map(track => renderReferenceTrackSummary(track)).join("")}
+        </div>
+      </div>
+    ` : ""}
     ${issues.length ? `
       <div class="log-section">
         <div class="mini-eyebrow">Flagged Subtitle Lines</div>
@@ -1166,10 +1411,16 @@ async function fetchModelList() {
 async function createJob(event) {
   event.preventDefault();
   saveSettings();
+  const referenceTracks = collectReferenceTracks();
+  if (referenceTracks === null) return;
   const data = new FormData();
   const file = fileInput.files[0];
   if (!file) return;
   data.append("file", file);
+  for (const track of referenceTracks) {
+    data.append("reference_languages", track.language);
+    data.append("reference_files", track.file);
+  }
   for (const element of form.elements) {
     if (!element.id || element.type === "file") continue;
     if (element.type === "checkbox") {
@@ -1192,11 +1443,14 @@ async function createJob(event) {
   loadSettings();
   updateSelectedFileLabel();
   updateSelectedTranslatedFileLabel();
+  resetReferenceTrackRows();
   await fetchJobs();
 }
 
 async function createReviewJob() {
   saveSettings();
+  const referenceTracks = collectReferenceTracks();
+  if (referenceTracks === null) return;
   const sourceFile = fileInput.files[0];
   const translatedFile = translatedFileInput.files[0];
   if (!sourceFile || !translatedFile) {
@@ -1206,6 +1460,10 @@ async function createReviewJob() {
   const data = new FormData();
   data.append("source_file", sourceFile);
   data.append("translated_file", translatedFile);
+  for (const track of referenceTracks) {
+    data.append("reference_languages", track.language);
+    data.append("reference_files", track.file);
+  }
   for (const element of form.elements) {
     if (!element.id || element.type === "file" || element.type === "button") continue;
     if (element.type === "checkbox") {
@@ -1259,16 +1517,52 @@ function handleDroppedFiles(files, targetInput = fileInput) {
     updateSelectedTranslatedFileLabel();
     return;
   }
-  updateSelectedFileLabel();
+  if (targetInput === fileInput) {
+    updateSelectedFileLabel();
+    return;
+  }
+  const row = targetInput.closest(".reference-track-row");
+  if (row) {
+    updateReferenceTrackLabel(row);
+  }
 }
 
 function bindDropZone(zone, targetInput) {
   if (!zone) return;
   zone.addEventListener("dragenter", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     zone.classList.add("dragover");
   });
   zone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    zone.classList.add("dragover");
+  });
+  zone.addEventListener("dragleave", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!zone.contains(event.relatedTarget)) {
+      zone.classList.remove("dragover");
+    }
+  });
+  zone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    zone.classList.remove("dragover");
+    handleDroppedFiles(event.dataTransfer.files, targetInput);
+  });
+}
+
+function bindReferenceTrackCard(zone) {
+  if (!zone) return;
+  zone.addEventListener("dragenter", (event) => {
+    if (event.target.closest(".reference-track-row")) return;
+    event.preventDefault();
+    zone.classList.add("dragover");
+  });
+  zone.addEventListener("dragover", (event) => {
+    if (event.target.closest(".reference-track-row")) return;
     event.preventDefault();
     zone.classList.add("dragover");
   });
@@ -1279,9 +1573,10 @@ function bindDropZone(zone, targetInput) {
     }
   });
   zone.addEventListener("drop", (event) => {
+    if (event.target.closest(".reference-track-row")) return;
     event.preventDefault();
     zone.classList.remove("dragover");
-    handleDroppedFiles(event.dataTransfer.files, targetInput);
+    addReferenceTracksFromFiles(event.dataTransfer.files);
   });
 }
 
@@ -1476,6 +1771,11 @@ document.addEventListener("click", (event) => {
     window.location.href = workspaceCard.dataset.workspaceUrl;
     return;
   }
+  const referenceRemove = event.target.closest("[data-reference-remove]");
+  if (referenceRemove) {
+    removeReferenceTrackRow(referenceRemove);
+    return;
+  }
   const reviewApply = event.target.closest("[data-review-apply]");
   if (reviewApply) {
     void saveReviewedLine(reviewApply.dataset.reviewApply, reviewApply.dataset.reviewMode || "save");
@@ -1576,6 +1876,13 @@ document.addEventListener("input", (event) => {
   }
 });
 
+document.addEventListener("change", (event) => {
+  const referenceFileInput = event.target.closest("[data-reference-file]");
+  if (referenceFileInput) {
+    updateReferenceTrackLabel(referenceFileInput.closest(".reference-track-row"));
+  }
+});
+
 form.addEventListener("submit", createJob);
 refreshBtn.addEventListener("click", () => void fetchJobs());
 clearFinishedBtn?.addEventListener("click", () => void clearFinishedJobs());
@@ -1584,6 +1891,7 @@ generateContextBtn?.addEventListener("click", () => void generateMainContext());
 saveSnapshotBtn?.addEventListener("click", () => void saveSnapshotContext());
 generateSnapshotBtn?.addEventListener("click", () => void generateSnapshotContext());
 testConnectionBtn.addEventListener("click", () => void testConnection());
+addReferenceTrackBtn?.addEventListener("click", () => addReferenceTrackRow());
 logDialog?.addEventListener("close", () => {
   openLogJobId = null;
 });
@@ -1618,6 +1926,8 @@ dialog?.addEventListener("close", () => {
 });
 fileInput.addEventListener("change", updateSelectedFileLabel);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
+initialCardStrategyInput?.addEventListener("change", () => void refreshInitialCardEstimate());
+initialCardMaxCharsInput?.addEventListener("input", () => void refreshInitialCardEstimate());
 modelInput.addEventListener("change", () => rememberModel(modelInput.value));
 modelSelect.addEventListener("change", () => {
   if (!modelSelect.value) return;
@@ -1630,12 +1940,15 @@ loadModelsBtn.addEventListener("click", () => void fetchModelList());
 reviewExistingBtn.addEventListener("click", () => void createReviewJob());
 bindDropZone(dropZone, fileInput);
 bindDropZone(translatedDropZone, translatedFileInput);
+bindReferenceTrackCard(referenceTracksCard);
 
 loadSettings();
 renderModelHistory();
 renderModelSelect();
 updateSelectedFileLabel();
 updateSelectedTranslatedFileLabel();
+renderReferenceTrackEmptyState();
+void refreshInitialCardEstimate();
 requestAnimationFrame(() => {
   document.body.classList.add("page-ready");
 });

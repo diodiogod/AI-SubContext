@@ -66,9 +66,38 @@ async def get_job(job_id: str) -> dict:
     return job.model_dump(mode="json")
 
 
+async def _read_reference_sources(
+    reference_files: list[UploadFile] | None,
+    reference_languages: list[str] | None,
+) -> list[dict[str, str]]:
+    files = [item for item in (reference_files or []) if item and item.filename]
+    languages = [str(item or "").strip() for item in (reference_languages or [])]
+    if not files:
+        return []
+    if len(files) != len(languages):
+        raise HTTPException(status_code=400, detail="Reference subtitle files and languages must match")
+
+    references: list[dict[str, str]] = []
+    for upload, language in zip(files, languages, strict=False):
+        if not upload.filename.lower().endswith(".srt"):
+            raise HTTPException(status_code=400, detail="Reference subtitles must be .srt files")
+        if not language:
+            raise HTTPException(status_code=400, detail="Each reference subtitle needs a language code")
+        references.append(
+            {
+                "filename": upload.filename,
+                "language": language,
+                "content": (await upload.read()).decode("utf-8-sig", errors="replace"),
+            }
+        )
+    return references
+
+
 @app.post("/api/jobs", response_model=CreateJobResponse)
 async def create_job(
     file: UploadFile = File(...),
+    reference_files: list[UploadFile] | None = File(default=None),
+    reference_languages: list[str] | None = Form(default=None),
     title: str = Form(default=""),
     base_url: str = Form(...),
     api_key: str = Form(default="lm-studio"),
@@ -78,6 +107,8 @@ async def create_job(
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
+    initial_card_strategy: str = Form(default="auto"),
+    initial_card_max_chars: int = Form(default=24000),
 ) -> CreateJobResponse:
     if not file.filename.lower().endswith(".srt"):
         raise HTTPException(status_code=400, detail="Only .srt files are supported")
@@ -93,15 +124,19 @@ async def create_job(
             batch_size=batch_size,
             temperature=temperature,
             structured_context=structured_context,
+            initial_card_strategy=initial_card_strategy,
+            initial_card_max_chars=initial_card_max_chars,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
+    reference_sources = await _read_reference_sources(reference_files, reference_languages)
     job = job_manager.create_job(
         filename=file.filename,
         title=title,
         original_srt=content,
         settings=settings,
+        reference_sources=reference_sources,
     )
     return CreateJobResponse(job_id=job.id)
 
@@ -110,6 +145,8 @@ async def create_job(
 async def create_review_job(
     source_file: UploadFile = File(...),
     translated_file: UploadFile = File(...),
+    reference_files: list[UploadFile] | None = File(default=None),
+    reference_languages: list[str] | None = Form(default=None),
     title: str = Form(default=""),
     base_url: str = Form(...),
     api_key: str = Form(default="lm-studio"),
@@ -119,6 +156,8 @@ async def create_review_job(
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
+    initial_card_strategy: str = Form(default="auto"),
+    initial_card_max_chars: int = Form(default=24000),
 ) -> CreateJobResponse:
     if not source_file.filename.lower().endswith(".srt") or not translated_file.filename.lower().endswith(".srt"):
         raise HTTPException(status_code=400, detail="Only .srt files are supported")
@@ -136,10 +175,13 @@ async def create_review_job(
             batch_size=batch_size,
             temperature=temperature,
             structured_context=structured_context,
+            initial_card_strategy=initial_card_strategy,
+            initial_card_max_chars=initial_card_max_chars,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
+    reference_sources = await _read_reference_sources(reference_files, reference_languages)
     job = job_manager.create_review_job(
         source_filename=source_file.filename,
         translated_filename=translated_file.filename,
@@ -147,6 +189,7 @@ async def create_review_job(
         source_srt=source_content,
         translated_srt=translated_content,
         settings=settings,
+        reference_sources=reference_sources,
     )
     return CreateJobResponse(job_id=job.id)
 

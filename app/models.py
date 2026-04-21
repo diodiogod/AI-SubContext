@@ -74,6 +74,7 @@ class SubtitleValidationIssue(BaseModel):
     status: str = "suspect"
     source_text: str = ""
     translated_text: str = ""
+    reason_codes: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     batch_index: int | None = None
 
@@ -93,6 +94,25 @@ class BatchContextSnapshot(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ReferenceSubtitleMatch(BaseModel):
+    position: int
+    text: str = ""
+    confidence: float = 0.0
+    matched_positions: list[int] = Field(default_factory=list)
+    start_time: str = ""
+    end_time: str = ""
+
+
+class ReferenceSubtitleTrack(BaseModel):
+    filename: str
+    language: str
+    total_lines: int = 0
+    matched_lines: int = 0
+    average_confidence: float = 0.0
+    alignment_mode: str = "timestamp"
+    aligned_lines: list[ReferenceSubtitleMatch] = Field(default_factory=list)
+
+
 class TranslationJob(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     filename: str
@@ -102,6 +122,7 @@ class TranslationJob(BaseModel):
     original_srt: str
     original_lines: list[SubtitleLine]
     translated_lines: list[SubtitleLine] = Field(default_factory=list)
+    reference_tracks: list[ReferenceSubtitleTrack] = Field(default_factory=list)
     session_context: SessionContext | None = None
     session_context_history: list[dict[str, Any]] = Field(default_factory=list)
     batch_context_snapshots: list[BatchContextSnapshot] = Field(default_factory=list)

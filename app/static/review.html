@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260421-1" />
+    <link rel="stylesheet" href="/static/app.css?v=20260421-2" />
   </head>
   <body>
     <main class="shell review-shell">
@@ -29,7 +29,7 @@
         <div class="review-toolbar">
           <div class="review-filter-row" id="review-page-filters"></div>
           <div class="review-toolbar-actions">
-            <input id="review-search" type="search" placeholder="Search source, translation, status, or reason" />
+            <input id="review-search" type="search" placeholder="Search source, translation, status, reason, or reference" />
             <button type="button" id="review-prev-flagged" class="ghost">Prev Flagged</button>
             <button type="button" id="review-next-flagged" class="ghost">Next Flagged</button>
             <button
@@ -56,11 +56,12 @@
                   <th>Reason</th>
                   <th>Source</th>
                   <th>Translation</th>
+                  <th>Refs</th>
                   <th>Batch</th>
                 </tr>
               </thead>
               <tbody id="review-table-body">
-                <tr><td colspan="7" class="job-meta">Loading lines...</td></tr>
+                <tr><td colspan="8" class="job-meta">Loading lines...</td></tr>
               </tbody>
             </table>
           </div>
@@ -91,6 +92,6 @@
       </form>
     </dialog>
 
-    <script src="/static/review.js?v=20260421-1"></script>
+    <script src="/static/review.js?v=20260421-4"></script>
   </body>
   </html>

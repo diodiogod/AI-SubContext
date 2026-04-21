@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -11,3 +13,5 @@ class TranslationSettings(BaseModel):
     batch_size: int = Field(default=10, ge=1, le=100)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     structured_context: bool = Field(default=True)
+    initial_card_strategy: Literal["auto", "whole", "sample"] = Field(default="auto")
+    initial_card_max_chars: int = Field(default=24000, ge=2000, le=200000)

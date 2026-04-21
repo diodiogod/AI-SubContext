@@ -93,12 +93,103 @@ function tooltipTag(label, tooltip, className = "inline-badge") {
 function compactReasonLabel(reason) {
   return {
     source_leak: "Source Leak",
+    source_language_leak: "Source Leak",
     missing_output: "Missing Output",
+    extra_output: "Extra Output",
     unchanged: "Unchanged",
+    unchanged_from_source: "Unchanged",
     manual: "Manual",
+    manual_fix: "Manual",
+    manual_retranslation: "Manual Retry",
     retry_fixed: "Retry Fixed",
+    isolated_retry: "Retry Fixed",
+    validator_language_mismatch: "Lang Mismatch",
     other: "Other",
   }[reason] || "Other";
+}
+
+function formatConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0%";
+  return `${Math.round(Math.max(0, Math.min(1, numeric)) * 100)}%`;
+}
+
+function buildReferenceMap(job) {
+  const map = new Map();
+  const tracks = Array.isArray(job?.reference_tracks) ? job.reference_tracks : [];
+  for (const track of tracks) {
+    const language = String(track?.language || "").trim() || "ref";
+    const filename = String(track?.filename || "reference.srt").trim() || "reference.srt";
+    const alignmentMode = String(track?.alignment_mode || "timestamp");
+    const alignedLines = Array.isArray(track?.aligned_lines) ? track.aligned_lines : [];
+    for (const item of alignedLines) {
+      const position = Number(item?.position);
+      if (!Number.isFinite(position)) continue;
+      const entry = {
+        language,
+        filename,
+        alignment_mode: alignmentMode,
+        text: String(item?.text || ""),
+        confidence: Number(item?.confidence || 0),
+        matched_positions: Array.isArray(item?.matched_positions) ? item.matched_positions.map(value => Number(value)).filter(Number.isFinite) : [],
+        start_time: String(item?.start_time || ""),
+        end_time: String(item?.end_time || ""),
+      };
+      map.set(position, [...(map.get(position) || []), entry]);
+    }
+  }
+  for (const [position, references] of map.entries()) {
+    map.set(position, references.sort((a, b) => (b.confidence || 0) - (a.confidence || 0)));
+  }
+  return map;
+}
+
+function summarizeReferenceInline(references) {
+  if (!references.length) return `<span class="job-meta">-</span>`;
+  if (references.length === 1) {
+    const [reference] = references;
+    return `<span class="job-fact">${escapeHtml(reference.language.toUpperCase())} ${escapeHtml(formatConfidence(reference.confidence))}</span>`;
+  }
+  const average = references.reduce((sum, item) => sum + Number(item.confidence || 0), 0) / references.length;
+  return `<span class="job-fact">${escapeHtml(String(references.length))} refs • ${escapeHtml(formatConfidence(average))}</span>`;
+}
+
+function formatMatchedPositions(positions) {
+  const values = (positions || []).map(value => Number(value)).filter(Number.isFinite);
+  if (!values.length) return "n/a";
+  if (values.length === 1) return String(values[0] + 1);
+  return `${values[0] + 1}-${values[values.length - 1] + 1}`;
+}
+
+function renderReferenceLines(references) {
+  if (!references.length) {
+    return `
+      <div class="review-source-block">
+        <div class="mini-eyebrow">Reference Lines</div>
+        <p>No aligned reference subtitles for this line.</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="review-source-block">
+      <div class="mini-eyebrow">Reference Lines</div>
+      <div class="reference-line-list">
+        ${references.map(reference => `
+          <article class="reference-line-card">
+            <div class="reference-line-meta">
+              <span class="job-fact">${escapeHtml(reference.language.toUpperCase())}</span>
+              <span class="job-fact">Confidence ${escapeHtml(formatConfidence(reference.confidence))}</span>
+              <span class="job-fact">Ref line ${escapeHtml(formatMatchedPositions(reference.matched_positions))}</span>
+              <span class="job-fact">${escapeHtml(reference.alignment_mode)}</span>
+              ${(reference.start_time && reference.end_time) ? `<span class="job-fact">${escapeHtml(`${reference.start_time} - ${reference.end_time}`)}</span>` : ""}
+            </div>
+            <div class="reference-line-copy">${escapeHtml(reference.text || "")}</div>
+            <div class="job-meta">${escapeHtml(reference.filename)}</div>
+          </article>
+        `).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function inferReasonTags(issue) {
@@ -367,17 +458,22 @@ function lineKey(position) {
 function getLines(job) {
   const translatedMap = new Map((job.translated_lines || []).map(line => [Number(line.position), line.text || ""]));
   const issueMap = new Map((job.validation_issues || []).map(issue => [Number(issue.position), issue]));
+  const referenceMap = buildReferenceMap(job);
   return (job.original_lines || []).map(line => {
     const position = Number(line.position);
     const issue = issueMap.get(position) || null;
     const status = lineStatus(issue);
-    const reasonTags = inferReasonTags(issue);
+    const reasonTags = Array.isArray(issue?.reason_codes) && issue.reason_codes.length
+      ? [...new Set(issue.reason_codes.map(code => String(code || "").trim()).filter(Boolean))]
+      : inferReasonTags(issue);
+    const references = referenceMap.get(position) || [];
     return {
       position,
       source_text: line.text || "",
       start_time: line.start_time || "",
       end_time: line.end_time || "",
       translated_text: translatedMap.get(position) || "",
+      reference_subtitles: references,
       issue,
       status,
       reason_tags: reasonTags,
@@ -404,6 +500,7 @@ function filteredLines(job) {
         lineDrafts.get(lineKey(line.position)) ?? line.translated_text,
         line.status,
         ...line.reason_tags.map(compactReasonLabel),
+        ...line.reference_subtitles.map(item => [item.language, item.filename, item.text, item.alignment_mode].join(" ")),
       ].join("\n").toLowerCase();
       if (!haystack.includes(currentSearch.toLowerCase())) return false;
     }
@@ -460,9 +557,10 @@ function updateToolbarState(job) {
 
 function renderTable(job) {
   const rows = filteredLines(job);
-  summaryEl.textContent = `${rows.length} line(s) visible`;
+  const linesWithReferences = rows.filter(line => line.reference_subtitles.length).length;
+  summaryEl.textContent = `${rows.length} line(s) visible${linesWithReferences ? ` • ${linesWithReferences} with references` : ""}`;
   if (!rows.length) {
-    tableBody.innerHTML = `<tr><td colspan="7" class="job-meta">No lines in this filter.</td></tr>`;
+    tableBody.innerHTML = `<tr><td colspan="8" class="job-meta">No lines in this filter.</td></tr>`;
     return;
   }
   if (!rows.some(line => line.position === selectedPosition)) {
@@ -480,6 +578,7 @@ function renderTable(job) {
         <td><div class="table-reasons">${renderReasonTags(line.reason_tags)}</div></td>
         <td><div class="table-copy">${escapeHtml(line.source_text)}</div></td>
         <td><div class="table-copy">${escapeHtml(translated)}</div></td>
+        <td><div class="table-reference-summary">${summarizeReferenceInline(line.reference_subtitles)}</div></td>
         <td>${escapeHtml(String(line.batch_index))}</td>
       </tr>
     `;
@@ -569,6 +668,7 @@ function renderSide(job) {
       <div class="mini-eyebrow">Source</div>
       <p>${escapeHtml(line.source_text)}</p>
     </div>
+    ${renderReferenceLines(line.reference_subtitles)}
     <label class="review-edit">
       <strong>Translation</strong>
       <textarea id="workspace-translation">${escapeHtml(draft)}</textarea>
@@ -588,8 +688,9 @@ function renderSide(job) {
 }
 
 function renderHeader(job) {
+  const referenceTracks = Array.isArray(job?.reference_tracks) ? job.reference_tracks : [];
   titleEl.textContent = job.title || job.filename || "Review";
-  metaEl.textContent = `${job.filename || "Job"} • ${job.settings?.source_language || "src"} → ${job.settings?.target_language || "tgt"} • ${job.settings?.model || "model"}`;
+  metaEl.textContent = `${job.filename || "Job"} • ${job.settings?.source_language || "src"} → ${job.settings?.target_language || "tgt"} • ${job.settings?.model || "model"}${referenceTracks.length ? ` • ${referenceTracks.length} reference track(s)` : ""}`;
 }
 
 function renderAll() {
