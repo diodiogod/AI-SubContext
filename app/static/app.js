@@ -45,6 +45,9 @@ const connectionTestResult = document.getElementById("connection-test-result");
 const initialCardStrategyInput = document.getElementById("initial_card_strategy");
 const initialCardMaxCharsInput = document.getElementById("initial_card_max_chars");
 const initialCardEstimate = document.getElementById("initial-card-estimate");
+const resetPromptLabBtn = document.getElementById("reset-prompt-lab-btn");
+const consoleTabButtons = [...document.querySelectorAll("[data-console-tab]")];
+const consoleTabPanels = [...document.querySelectorAll("[data-console-panel]")];
 
 let editingJobId = null;
 let openLogJobId = null;
@@ -59,6 +62,22 @@ const contextEditorDrafts = new Map();
 let referenceTrackCounter = 0;
 let initialCardEstimateToken = 0;
 let sourceSubtitleTextStats = null;
+let runtimeDefaults = {};
+
+const PROMPT_FIELD_IDS = [
+  "prompt_translation_system",
+  "prompt_translation_strict_retry",
+  "prompt_initial_context_system",
+  "prompt_full_context_refresh_system",
+  "prompt_batch_context_refresh_system",
+  "prompt_line_revision_system",
+];
+
+const RUNTIME_DEFAULT_FIELD_IDS = [
+  "max_completion_tokens",
+  "request_timeout_seconds",
+  ...PROMPT_FIELD_IDS,
+];
 
 function escapeHtml(value) {
   return String(value)
@@ -259,30 +278,88 @@ function setModelListStatus(message, ok = true) {
   modelListStatus.style.color = ok ? "var(--ok)" : "var(--danger)";
 }
 
-function loadSettings() {
+function readStoredSettings() {
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return;
+  if (!raw) return {};
   try {
-    const settings = JSON.parse(raw);
-    for (const [key, value] of Object.entries(settings)) {
-      const field = document.getElementById(key);
-      if (!field) continue;
-      if (field.type === "checkbox") {
-        field.checked = Boolean(value);
-      } else {
-        field.value = value;
-      }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function fetchRuntimeDefaults() {
+  try {
+    const response = await fetch("/api/runtime/defaults");
+    if (!response.ok) return;
+    runtimeDefaults = await response.json();
+  } catch (_) {
+    runtimeDefaults = {};
+  }
+}
+
+function applyRuntimeDefaults(force = false) {
+  for (const fieldId of RUNTIME_DEFAULT_FIELD_IDS) {
+    const field = document.getElementById(fieldId);
+    if (!field || !(fieldId in runtimeDefaults)) continue;
+    const nextValue = runtimeDefaults[fieldId];
+    const isCheckbox = field.type === "checkbox";
+    const hasValue = isCheckbox ? field.checked : String(field.value || "").trim().length > 0;
+    if (!force && hasValue) continue;
+    if (isCheckbox) {
+      field.checked = Boolean(nextValue);
+    } else {
+      field.value = nextValue;
     }
-    if (settings.model) {
-      rememberModel(settings.model);
+  }
+}
+
+function resetPromptLabDefaults() {
+  if (!Object.keys(runtimeDefaults).length) return;
+  for (const fieldId of RUNTIME_DEFAULT_FIELD_IDS) {
+    const field = document.getElementById(fieldId);
+    if (!field || !(fieldId in runtimeDefaults)) continue;
+    field.value = runtimeDefaults[fieldId];
+  }
+  saveSettings();
+  void refreshInitialCardEstimate();
+}
+
+function setConsoleTab(tabId) {
+  for (const button of consoleTabButtons) {
+    const active = button.dataset.consoleTab === tabId;
+    button.classList.toggle("active", active);
+    button.classList.toggle("ghost", !active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of consoleTabPanels) {
+    const active = panel.dataset.consolePanel === tabId;
+    panel.classList.toggle("active", active);
+    panel.hidden = !active;
+  }
+}
+
+function loadSettings() {
+  const settings = readStoredSettings();
+  for (const [key, value] of Object.entries(settings)) {
+    const field = document.getElementById(key);
+    if (!field) continue;
+    if (field.type === "checkbox") {
+      field.checked = Boolean(value);
+    } else {
+      field.value = value;
     }
-  } catch (_) {}
+  }
+  if (settings.model) {
+    rememberModel(settings.model);
+  }
 }
 
 function saveSettings() {
-  const payload = {};
+  const payload = { ...readStoredSettings() };
   for (const element of form.elements) {
-    if (!element.id || element.type === "file") continue;
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
     payload[element.id] = element.type === "checkbox" ? element.checked : element.value;
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -292,9 +369,9 @@ function saveSettings() {
 }
 
 function collectSettingsPayload() {
-  const payload = {};
+  const payload = { ...runtimeDefaults, ...readStoredSettings() };
   for (const element of form.elements) {
-    if (!element.id || element.type === "file" || element.type === "button") continue;
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
     payload[element.id] = element.type === "checkbox" ? element.checked : element.value;
   }
   return payload;
@@ -831,6 +908,11 @@ function renderContext(job) {
   const previous = (job.session_context_history || [])[1];
   const validation = job.validation_stats || {};
   const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
+  const canResume = job.status === "paused" || job.status === "failed";
+  const resumeLabel = job.status === "failed" ? "Resume Failed Job" : "Resume";
+  const resumeTitle = job.status === "failed"
+    ? "Resume a failed translation from the last unfinished batch."
+    : "Resume a paused job from the next pending batch.";
   return `
     <div class="context-card">
       <div class="panel-head">
@@ -842,7 +924,7 @@ function renderContext(job) {
       </div>
       <div class="actions">
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
-        <button class="ghost" data-action="resume" data-id="${job.id}" title="Resume a paused job from the next pending batch." ${job.status !== "paused" ? "disabled" : ""}>Resume</button>
+        <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
         <a class="ghost link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
         <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Open the line review panel. Use it to inspect flagged lines and apply manual fixes.">Review Lines</button>
         <button class="ghost" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">View Log</button>
@@ -946,6 +1028,11 @@ function renderJobs(jobs) {
       const validation = job.validation_stats || {};
       const issueCount = Array.isArray(job.validation_issues) ? job.validation_issues.length : 0;
       const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
+      const canResume = job.status === "paused" || job.status === "failed";
+      const resumeLabel = job.status === "failed" ? "Resume Failed" : "Resume";
+      const resumeTitle = job.status === "failed"
+        ? "Resume this failed translation from the last unfinished batch."
+        : "Resume this paused translation.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
       <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
@@ -978,6 +1065,7 @@ function renderJobs(jobs) {
           ` : ""}
         </div>
         <div class="job-actions">
+          <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
           <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Inspect flagged subtitle lines and save manual fixes." ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}" title="Download the current translated subtitle file.">Download</button>` : ""}
           <button class="ghost" data-action="delete-job" data-id="${job.id}" title="Remove this job entry from the list. Active jobs must be paused or stopped first." ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete</button>
@@ -1421,12 +1509,12 @@ async function createJob(event) {
     data.append("reference_languages", track.language);
     data.append("reference_files", track.file);
   }
-  for (const element of form.elements) {
-    if (!element.id || element.type === "file") continue;
-    if (element.type === "checkbox") {
-      data.append(element.id, element.checked ? "true" : "false");
-    } else {
-      data.append(element.id, element.value);
+  const payload = collectSettingsPayload();
+  for (const [key, value] of Object.entries(payload)) {
+    if (typeof value === "boolean") {
+      data.append(key, value ? "true" : "false");
+    } else if (value !== undefined && value !== null) {
+      data.append(key, value);
     }
   }
 
@@ -1464,12 +1552,12 @@ async function createReviewJob() {
     data.append("reference_languages", track.language);
     data.append("reference_files", track.file);
   }
-  for (const element of form.elements) {
-    if (!element.id || element.type === "file" || element.type === "button") continue;
-    if (element.type === "checkbox") {
-      data.append(element.id, element.checked ? "true" : "false");
-    } else {
-      data.append(element.id, element.value);
+  const payload = collectSettingsPayload();
+  for (const [key, value] of Object.entries(payload)) {
+    if (typeof value === "boolean") {
+      data.append(key, value ? "true" : "false");
+    } else if (value !== undefined && value !== null) {
+      data.append(key, value);
     }
   }
 
@@ -1892,6 +1980,10 @@ saveSnapshotBtn?.addEventListener("click", () => void saveSnapshotContext());
 generateSnapshotBtn?.addEventListener("click", () => void generateSnapshotContext());
 testConnectionBtn.addEventListener("click", () => void testConnection());
 addReferenceTrackBtn?.addEventListener("click", () => addReferenceTrackRow());
+resetPromptLabBtn?.addEventListener("click", () => resetPromptLabDefaults());
+for (const button of consoleTabButtons) {
+  button.addEventListener("click", () => setConsoleTab(button.dataset.consoleTab || "runtime"));
+}
 logDialog?.addEventListener("close", () => {
   openLogJobId = null;
 });
@@ -1941,17 +2033,24 @@ reviewExistingBtn.addEventListener("click", () => void createReviewJob());
 bindDropZone(dropZone, fileInput);
 bindDropZone(translatedDropZone, translatedFileInput);
 bindReferenceTrackCard(referenceTracksCard);
+setConsoleTab("runtime");
 
-loadSettings();
-renderModelHistory();
-renderModelSelect();
-updateSelectedFileLabel();
-updateSelectedTranslatedFileLabel();
-renderReferenceTrackEmptyState();
-void refreshInitialCardEstimate();
-requestAnimationFrame(() => {
-  document.body.classList.add("page-ready");
-});
-void fetchModelList();
-fetchJobs();
-setInterval(fetchJobs, 2500);
+async function initializeApp() {
+  await fetchRuntimeDefaults();
+  loadSettings();
+  applyRuntimeDefaults();
+  renderModelHistory();
+  renderModelSelect();
+  updateSelectedFileLabel();
+  updateSelectedTranslatedFileLabel();
+  renderReferenceTrackEmptyState();
+  await refreshInitialCardEstimate();
+  requestAnimationFrame(() => {
+    document.body.classList.add("page-ready");
+  });
+  await fetchModelList();
+  await fetchJobs();
+  setInterval(fetchJobs, 2500);
+}
+
+void initializeApp();

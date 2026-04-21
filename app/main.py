@@ -17,6 +17,7 @@ from app.models import (
     ModelListResponse,
     ModelTestResponse,
     RetranslateLineRequest,
+    RuntimeDefaultsResponse,
     SessionContext,
     UpdateBatchContextSnapshotRequest,
     UpdateTranslatedLineRequest,
@@ -48,9 +49,19 @@ async def review_workspace(job_id: str) -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "review.html"))
 
 
+@app.get("/prompt-lab")
+async def prompt_lab() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "prompt_lab.html"))
+
+
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/runtime/defaults", response_model=RuntimeDefaultsResponse)
+async def runtime_defaults() -> RuntimeDefaultsResponse:
+    return RuntimeDefaultsResponse(**job_manager.translator.runtime_defaults())
 
 
 @app.get("/api/jobs")
@@ -109,6 +120,14 @@ async def create_job(
     structured_context: bool = Form(default=True),
     initial_card_strategy: str = Form(default="auto"),
     initial_card_max_chars: int = Form(default=24000),
+    max_completion_tokens: int = Form(default=1800),
+    request_timeout_seconds: int = Form(default=120),
+    prompt_translation_system: str = Form(default=""),
+    prompt_translation_strict_retry: str = Form(default=""),
+    prompt_initial_context_system: str = Form(default=""),
+    prompt_full_context_refresh_system: str = Form(default=""),
+    prompt_batch_context_refresh_system: str = Form(default=""),
+    prompt_line_revision_system: str = Form(default=""),
 ) -> CreateJobResponse:
     if not file.filename.lower().endswith(".srt"):
         raise HTTPException(status_code=400, detail="Only .srt files are supported")
@@ -126,6 +145,14 @@ async def create_job(
             structured_context=structured_context,
             initial_card_strategy=initial_card_strategy,
             initial_card_max_chars=initial_card_max_chars,
+            max_completion_tokens=max_completion_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            prompt_translation_system=prompt_translation_system,
+            prompt_translation_strict_retry=prompt_translation_strict_retry,
+            prompt_initial_context_system=prompt_initial_context_system,
+            prompt_full_context_refresh_system=prompt_full_context_refresh_system,
+            prompt_batch_context_refresh_system=prompt_batch_context_refresh_system,
+            prompt_line_revision_system=prompt_line_revision_system,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
@@ -158,6 +185,14 @@ async def create_review_job(
     structured_context: bool = Form(default=True),
     initial_card_strategy: str = Form(default="auto"),
     initial_card_max_chars: int = Form(default=24000),
+    max_completion_tokens: int = Form(default=1800),
+    request_timeout_seconds: int = Form(default=120),
+    prompt_translation_system: str = Form(default=""),
+    prompt_translation_strict_retry: str = Form(default=""),
+    prompt_initial_context_system: str = Form(default=""),
+    prompt_full_context_refresh_system: str = Form(default=""),
+    prompt_batch_context_refresh_system: str = Form(default=""),
+    prompt_line_revision_system: str = Form(default=""),
 ) -> CreateJobResponse:
     if not source_file.filename.lower().endswith(".srt") or not translated_file.filename.lower().endswith(".srt"):
         raise HTTPException(status_code=400, detail="Only .srt files are supported")
@@ -177,6 +212,14 @@ async def create_review_job(
             structured_context=structured_context,
             initial_card_strategy=initial_card_strategy,
             initial_card_max_chars=initial_card_max_chars,
+            max_completion_tokens=max_completion_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            prompt_translation_system=prompt_translation_system,
+            prompt_translation_strict_retry=prompt_translation_strict_retry,
+            prompt_initial_context_system=prompt_initial_context_system,
+            prompt_full_context_refresh_system=prompt_full_context_refresh_system,
+            prompt_batch_context_refresh_system=prompt_batch_context_refresh_system,
+            prompt_line_revision_system=prompt_line_revision_system,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc

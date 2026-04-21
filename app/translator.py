@@ -12,7 +12,11 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from app.config import TranslationSettings
+from app.config import (
+    DEFAULT_MAX_COMPLETION_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    TranslationSettings,
+)
 from app.models import JobValidationStats, SessionContext, SubtitleLine, SubtitleValidationIssue
 from app.srt_utils import chunk_lines
 
@@ -50,6 +54,79 @@ _LANGUAGE_ALIASES = {
     "korean": "ko",
     "russian": "ru",
 }
+
+DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert subtitle translator. "
+    "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
+    "Return JSON only. Also return a compact state_update for future batches. "
+    "Do not explain your reasoning, do not think out loud, and do not include analysis or commentary outside the JSON object. "
+    "Use character gender only as a grammar hint and prefer unknown over guessing. "
+    "The primary subtitle text is always the canonical source. "
+    "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
+    "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
+    "For state_update: keep premise as stable whole-title context, but make scene_context specific to the current batch only. "
+    "Keep state_update compact and factual. "
+    "Do not repeat a broad movie synopsis in scene_context if the current lines are about a narrower exchange, location, or action beat."
+)
+
+DEFAULT_STRICT_RETRY_PROMPT = _STRICT_RETRY_INSTRUCTION
+
+DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT = (
+    "You are preparing a compact movie subtitle translation card. "
+    "Use only evidence from the provided cleaned subtitle text. "
+    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
+    "Do not describe the translation task itself. "
+    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
+    "Premise must describe the story or setup only when the evidence is strong enough; otherwise leave it empty. "
+    "Style notes must describe real narrative, dialog, register, or recurring linguistic traits from the subtitle text, not generic instructions. "
+    "Infer only stable facts. Prefer unknown over guessing. "
+    "Return JSON only."
+)
+
+DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT = (
+    "You are refreshing a compact subtitle translation context card from cleaned subtitle text covering the whole title. "
+    "Use the existing card as a base, revise only with evidence from the provided text, and prefer unknown over guessing. "
+    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
+    "Do not describe the translation task itself. "
+    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
+    "Keep premise for stable whole-title facts only. "
+    "Keep the card compact. "
+    "Return JSON only."
+)
+
+DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT = (
+    "You are updating a compact subtitle translation context card. "
+    "Use the existing card as a base, revise only with evidence from the provided subtitle lines, "
+    "and prefer unknown over guessing. "
+    "Keep premise for stable whole-title facts, but make scene_context describe the local scene or conversation in these lines only. "
+    "Do not restate the full movie setup in scene_context unless these lines genuinely cover that setup. "
+    "Keep the card compact. "
+    "Return JSON only."
+)
+
+DEFAULT_LINE_REVISION_SYSTEM_PROMPT = (
+    "You are revising a single subtitle line translation. "
+    "Use the source text, current translation, and session context to produce the best final target-language line. "
+    "If reference_subtitles are present, treat them as supporting aligned subtitle references from other languages. "
+    "The source_text remains canonical. "
+    "Return only JSON. "
+    "Do not explain your reasoning."
+)
+
+PROMPT_DEFAULTS = {
+    "prompt_translation_system": DEFAULT_TRANSLATION_SYSTEM_PROMPT,
+    "prompt_translation_strict_retry": DEFAULT_STRICT_RETRY_PROMPT,
+    "prompt_initial_context_system": DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT,
+    "prompt_full_context_refresh_system": DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT,
+    "prompt_batch_context_refresh_system": DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT,
+    "prompt_line_revision_system": DEFAULT_LINE_REVISION_SYSTEM_PROMPT,
+}
+
+
+class ModelRequestTimeout(RuntimeError):
+    def __init__(self, seconds: int):
+        self.seconds = int(seconds)
+        super().__init__(f"Model request timed out after {self.seconds}s")
 
 
 @dataclass
@@ -303,24 +380,46 @@ def _schema_payload(name: str, schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _effective_prompt(settings: TranslationSettings, field_name: str, default_value: str) -> str:
+    override = str(getattr(settings, field_name, "") or "").strip()
+    return override or default_value
+
+
+def _effective_timeout_seconds(settings: TranslationSettings) -> int:
+    return max(15, int(getattr(settings, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS) or DEFAULT_REQUEST_TIMEOUT_SECONDS))
+
+
+def _effective_max_completion_tokens(settings: TranslationSettings) -> int:
+    return max(128, int(getattr(settings, "max_completion_tokens", DEFAULT_MAX_COMPLETION_TOKENS) or DEFAULT_MAX_COMPLETION_TOKENS))
+
+
 def _session_context_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "premise": {"type": "string"},
-            "tone": {"type": "string"},
-            "scene_context": {"type": "string"},
-            "style_notes": {"type": "array", "items": {"type": "string"}},
+            "premise": {"type": "string", "maxLength": 500},
+            "tone": {"type": "string", "maxLength": 160},
+            "scene_context": {"type": "string", "maxLength": 500},
+            "style_notes": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string", "maxLength": 180},
+            },
             "characters": {
                 "type": "array",
+                "maxItems": 16,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "name": {"type": "string"},
-                        "role": {"type": "string"},
-                        "aliases": {"type": "array", "items": {"type": "string"}},
+                        "name": {"type": "string", "maxLength": 120},
+                        "role": {"type": "string", "maxLength": 260},
+                        "aliases": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {"type": "string", "maxLength": 80},
+                        },
                         "gender": {"type": "string", "enum": ["f", "m", "neutral", "unknown"]},
                     },
                     "required": ["name", "role", "aliases", "gender"],
@@ -328,18 +427,23 @@ def _session_context_schema() -> dict[str, Any]:
             },
             "glossary": {
                 "type": "array",
+                "maxItems": 24,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "term": {"type": "string"},
-                        "meaning": {"type": "string"},
+                        "term": {"type": "string", "maxLength": 120},
+                        "meaning": {"type": "string", "maxLength": 260},
                         "keep": {"type": "boolean"},
                     },
                     "required": ["term", "meaning", "keep"],
                 },
             },
-            "unresolved_ambiguities": {"type": "array", "items": {"type": "string"}},
+            "unresolved_ambiguities": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string", "maxLength": 220},
+            },
         },
         "required": [
             "premise",
@@ -360,12 +464,13 @@ def _translation_schema() -> dict[str, Any]:
         "properties": {
             "translations": {
                 "type": "array",
+                "maxItems": 100,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
                         "position": {"type": "integer"},
-                        "text": {"type": "string"},
+                        "text": {"type": "string", "maxLength": 500},
                     },
                     "required": ["position", "text"],
                 },
@@ -381,7 +486,7 @@ def _single_line_revision_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "text": {"type": "string"},
+            "text": {"type": "string", "maxLength": 500},
         },
         "required": ["text"],
     }
@@ -681,7 +786,14 @@ def _ordered_lines_from_map(batch_lines: list[SubtitleLine], translated_by_posit
 
 class OpenAICompatibleTranslator:
     def __init__(self) -> None:
-        self.timeout = httpx.Timeout(300.0)
+        pass
+
+    def runtime_defaults(self) -> dict[str, Any]:
+        return {
+            "max_completion_tokens": DEFAULT_MAX_COMPLETION_TOKENS,
+            "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            **PROMPT_DEFAULTS,
+        }
 
     def _detect_wsl_host_ip(self) -> str | None:
         if platform.system().lower() != "linux":
@@ -852,10 +964,12 @@ class OpenAICompatibleTranslator:
         schema_name: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
+        timeout_seconds = _effective_timeout_seconds(settings)
         payload = {
             "model": settings.model,
             "messages": messages,
             "temperature": settings.temperature,
+            "max_tokens": _effective_max_completion_tokens(settings),
             "response_format": _schema_payload(schema_name, schema),
         }
         headers = {
@@ -865,7 +979,7 @@ class OpenAICompatibleTranslator:
         candidates = self._candidate_base_urls(settings.base_url)
         last_error: Exception | None = None
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
             for url in candidates:
                 try:
                     response = await client.post(url + "/chat/completions", json=payload, headers=headers)
@@ -879,8 +993,11 @@ class OpenAICompatibleTranslator:
                             return _extract_json_blob(_extract_message_text(response.json()))
                         response.raise_for_status()
                     return _extract_json_blob(_extract_message_text(response.json()))
-                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                     last_error = exc
+                    continue
+                except httpx.ReadTimeout:
+                    last_error = ModelRequestTimeout(timeout_seconds)
                     continue
 
         if last_error:
@@ -896,16 +1013,7 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are preparing a compact movie subtitle translation card. "
-                    "Use only evidence from the provided cleaned subtitle text. "
-                    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
-                    "Do not describe the translation task itself. "
-                    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
-                    "Premise must describe the story or setup only when the evidence is strong enough; otherwise leave it empty. "
-                    "Style notes must describe real narrative, dialog, register, or recurring linguistic traits from the subtitle text, not generic instructions. "
-                    "Infer only stable facts. Prefer unknown over guessing."
-                ),
+                "content": _effective_prompt(settings, "prompt_initial_context_system", DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT),
             },
             {
                 "role": "user",
@@ -951,14 +1059,10 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are refreshing a compact subtitle translation context card from cleaned subtitle text covering the whole title. "
-                    "Use the existing card as a base, revise only with evidence from the provided text, and prefer unknown over guessing. "
-                    "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
-                    "Do not describe the translation task itself. "
-                    "Do not mention source language, target language, subtitle translation, subtitles, movie card, context card, or the title as metadata. "
-                    "Keep premise for stable whole-title facts only. "
-                    "Return JSON only."
+                "content": _effective_prompt(
+                    settings,
+                    "prompt_full_context_refresh_system",
+                    DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT,
                 ),
             },
             {
@@ -1001,13 +1105,10 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are updating a compact subtitle translation context card. "
-                    "Use the existing card as a base, revise only with evidence from the provided subtitle lines, "
-                    "and prefer unknown over guessing. "
-                    "Keep premise for stable whole-title facts, but make scene_context describe the local scene or conversation in these lines only. "
-                    "Do not restate the full movie setup in scene_context unless these lines genuinely cover that setup. "
-                    "Return JSON only."
+                "content": _effective_prompt(
+                    settings,
+                    "prompt_batch_context_refresh_system",
+                    DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT,
                 ),
             },
             {
@@ -1129,17 +1230,7 @@ class OpenAICompatibleTranslator:
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         extra_instruction: str = "",
     ) -> tuple[list[SubtitleLine], SessionContext | None]:
-        system_instruction = (
-            "You are an expert subtitle translator. "
-            "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
-            "Return JSON only. Also return a compact state_update for future batches. "
-            "Use character gender only as a grammar hint and prefer unknown over guessing. "
-            "The primary subtitle text is always the canonical source. "
-            "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
-            "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
-            "For state_update: keep premise as stable whole-title context, but make scene_context specific to the current batch only. "
-            "Do not repeat a broad movie synopsis in scene_context if the current lines are about a narrower exchange, location, or action beat."
-        )
+        system_instruction = _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT)
         if extra_instruction:
             system_instruction += " " + extra_instruction
 
@@ -1198,13 +1289,7 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
     ) -> tuple[SubtitleLine, BatchProcessingStats]:
-        system_instruction = (
-            "You are revising a single subtitle line translation. "
-            "Use the source text, current translation, and session context to produce the best final target-language line. "
-            "If reference_subtitles are present, treat them as supporting aligned subtitle references from other languages. "
-            "The source_text remains canonical. "
-            "Return only JSON."
-        )
+        system_instruction = _effective_prompt(settings, "prompt_line_revision_system", DEFAULT_LINE_REVISION_SYSTEM_PROMPT)
         if extra_instruction.strip():
             system_instruction += " Additional instruction: " + extra_instruction.strip()
 
@@ -1315,7 +1400,7 @@ class OpenAICompatibleTranslator:
                 session_context,
                 reference_subtitles_by_position=reference_subtitles_by_position,
                 extra_instruction=(
-                    _STRICT_RETRY_INSTRUCTION
+                    _effective_prompt(settings, "prompt_translation_strict_retry", DEFAULT_STRICT_RETRY_PROMPT)
                     + " Focus only on this subtitle line and translate it fully into the target language."
                 ),
             )
@@ -1363,6 +1448,46 @@ class OpenAICompatibleTranslator:
 
         return _ordered_lines_from_map(batch_lines, translated_by_position), repair_stats
 
+    async def _split_batch_and_translate(
+        self,
+        settings: TranslationSettings,
+        batch_lines: list[SubtitleLine],
+        session_context: SessionContext | None,
+        reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
+        batch_index: int | None = None,
+        log_event: LogEvent | None = None,
+        depth: int = 0,
+        reason: str = "Splitting batch",
+    ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
+        midpoint = max(1, len(batch_lines) // 2)
+        first_half, second_half = batch_lines[:midpoint], batch_lines[midpoint:]
+        if log_event:
+            log_event(
+                "warn",
+                f"{reason}; splitting batch into chunks of {len(first_half)} and {len(second_half)} lines",
+            )
+        translated_first, context_after_first, first_stats = await self._translate_batch_with_validation(
+            settings,
+            first_half,
+            session_context,
+            reference_subtitles_by_position=reference_subtitles_by_position,
+            batch_index=batch_index,
+            log_event=log_event,
+            depth=depth + 1,
+        )
+        translated_second, context_after_second, second_stats = await self._translate_batch_with_validation(
+            settings,
+            second_half,
+            context_after_first,
+            reference_subtitles_by_position=reference_subtitles_by_position,
+            batch_index=batch_index,
+            log_event=log_event,
+            depth=depth + 1,
+        )
+        merged_stats = BatchProcessingStats(retried_batches=1, split_batches=1)
+        merged_stats.merge(first_stats).merge(second_stats)
+        return [*translated_first, *translated_second], context_after_second, merged_stats
+
     async def _translate_batch_with_validation(
         self,
         settings: TranslationSettings,
@@ -1377,20 +1502,41 @@ class OpenAICompatibleTranslator:
         last_context: SessionContext | None = session_context
         last_validation = BatchValidationResult(False, [], None, "")
         first_failed_positions: list[int] = []
+        strict_retry_instruction = _effective_prompt(
+            settings,
+            "prompt_translation_strict_retry",
+            DEFAULT_STRICT_RETRY_PROMPT,
+        )
 
-        for attempt_index, extra_instruction in enumerate(("", _STRICT_RETRY_INSTRUCTION), start=1):
+        for attempt_index, extra_instruction in enumerate(("", strict_retry_instruction), start=1):
             if log_event:
                 if attempt_index == 1:
                     log_event("info", f"Submitting batch to model with {len(batch_lines)} lines")
                 else:
                     log_event("warn", "Retrying batch with stricter translation instruction")
-            translated_lines, merged_context = await self._translate_batch_once(
-                settings,
-                batch_lines,
-                session_context,
-                reference_subtitles_by_position=reference_subtitles_by_position,
-                extra_instruction=extra_instruction,
-            )
+            try:
+                translated_lines, merged_context = await self._translate_batch_once(
+                    settings,
+                    batch_lines,
+                    session_context,
+                    reference_subtitles_by_position=reference_subtitles_by_position,
+                    extra_instruction=extra_instruction,
+                )
+            except ModelRequestTimeout as exc:
+                if len(batch_lines) > 1 and depth < 4:
+                    return await self._split_batch_and_translate(
+                        settings,
+                        batch_lines,
+                        session_context,
+                        reference_subtitles_by_position=reference_subtitles_by_position,
+                        batch_index=batch_index,
+                        log_event=log_event,
+                        depth=depth,
+                        reason=f"Model request timed out after {exc.seconds}s",
+                    )
+                if log_event:
+                    log_event("error", f"Model request timed out after {exc.seconds}s")
+                raise
             validation = _validate_translated_batch(settings, batch_lines, translated_lines)
             flagged_positions = _flagged_positions(validation, batch_lines, settings)
             if log_event:
@@ -1444,34 +1590,16 @@ class OpenAICompatibleTranslator:
                 first_failed_positions = flagged_positions
 
         if len(batch_lines) > 1 and depth < 4:
-            midpoint = max(1, len(batch_lines) // 2)
-            first_half, second_half = batch_lines[:midpoint], batch_lines[midpoint:]
-            if log_event:
-                log_event(
-                    "warn",
-                    f"Validation still failing; splitting batch into chunks of {len(first_half)} and {len(second_half)} lines",
-                )
-            translated_first, context_after_first, first_stats = await self._translate_batch_with_validation(
+            return await self._split_batch_and_translate(
                 settings,
-                first_half,
+                batch_lines,
                 session_context,
                 reference_subtitles_by_position=reference_subtitles_by_position,
                 batch_index=batch_index,
                 log_event=log_event,
-                depth=depth + 1,
+                depth=depth,
+                reason="Validation still failing",
             )
-            translated_second, context_after_second, second_stats = await self._translate_batch_with_validation(
-                settings,
-                second_half,
-                context_after_first,
-                reference_subtitles_by_position=reference_subtitles_by_position,
-                batch_index=batch_index,
-                log_event=log_event,
-                depth=depth + 1,
-            )
-            merged_stats = BatchProcessingStats(retried_batches=1, split_batches=1)
-            merged_stats.merge(first_stats).merge(second_stats)
-            return [*translated_first, *translated_second], context_after_second, merged_stats
 
         if last_translated is not None:
             flagged_positions = first_failed_positions or _flagged_positions(last_validation, batch_lines, settings)

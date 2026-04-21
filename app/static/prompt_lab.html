@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI SubContext Prompt Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css?v=20260421-6" />
+  </head>
+  <body>
+    <main class="shell review-shell">
+      <section class="panel review-header">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Prompt Lab</div>
+            <h1>Prompt and Runtime Tuning</h1>
+            <div class="job-meta">
+              These settings persist locally and are copied into every new job you create. Existing jobs keep the settings they started with.
+            </div>
+          </div>
+          <div class="actions">
+            <a class="ghost link-button" href="/">Back To Console</a>
+            <button type="button" id="prompt-lab-reset" class="ghost">Reset to Defaults</button>
+            <button type="button" id="prompt-lab-save">Save Prompt Lab</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="prompt-lab-flow">
+          <div class="mini-eyebrow">Call Flow</div>
+          <p class="job-meta">Initial card -> batch translation -> strict retry when validation fails -> isolated line retry when needed -> manual line revision from review.</p>
+        </div>
+      </section>
+
+      <form id="prompt-lab-form" class="form-layout">
+        <section class="panel form-section">
+          <div class="section-head">
+            <div class="mini-eyebrow">Safety Controls</div>
+          </div>
+          <div class="field-grid field-grid-controls">
+            <label>
+              <span class="label-row">Max Output Tokens <span class="info-dot" title="Hard cap for one model response. Lower prevents runaway answers and overthinking. Higher gives the model more room, but increases the chance of giant malformed JSON or long stalls.">?</span></span>
+              <input type="number" id="max_completion_tokens" min="128" max="16000" step="64" />
+            </label>
+            <label>
+              <span class="label-row">Request Timeout (s) <span class="info-dot" title="How long one model request may run before the backend gives up. If a multi-line batch times out, the backend now auto-splits it and retries smaller chunks.">?</span></span>
+              <input type="number" id="request_timeout_seconds" min="15" max="900" step="5" />
+            </label>
+          </div>
+        </section>
+
+        <section class="panel form-section">
+          <div class="section-head">
+            <div class="mini-eyebrow">Prompt Templates</div>
+          </div>
+          <div class="field-grid field-grid-prompt-lab">
+            <label class="field-span-full">
+              <span class="label-row">Batch Translation Prompt <span class="info-dot" title="Main system prompt for normal translation batches. This is the strongest tuning point.">?</span></span>
+              <textarea id="prompt_translation_system" class="prompt-input"></textarea>
+            </label>
+            <label class="field-span-full">
+              <span class="label-row">Strict Retry Prompt <span class="info-dot" title="Extra instruction used when validation thinks the model left text untranslated or suspiciously close to the source.">?</span></span>
+              <textarea id="prompt_translation_strict_retry" class="prompt-input"></textarea>
+            </label>
+            <label class="field-span-full">
+              <span class="label-row">Initial Card Prompt <span class="info-dot" title="Builds the first whole-title context card before translation starts.">?</span></span>
+              <textarea id="prompt_initial_context_system" class="prompt-input"></textarea>
+            </label>
+            <label class="field-span-full">
+              <span class="label-row">Whole File Card Refresh Prompt <span class="info-dot" title="Used when you regenerate the main context card from the full subtitle file.">?</span></span>
+              <textarea id="prompt_full_context_refresh_system" class="prompt-input"></textarea>
+            </label>
+            <label class="field-span-full">
+              <span class="label-row">Batch Card Prompt <span class="info-dot" title="Used when you generate or refresh a local batch or scene card.">?</span></span>
+              <textarea id="prompt_batch_context_refresh_system" class="prompt-input"></textarea>
+            </label>
+            <label class="field-span-full">
+              <span class="label-row">Line Revision Prompt <span class="info-dot" title="Used by manual per-line retranslation in review mode.">?</span></span>
+              <textarea id="prompt_line_revision_system" class="prompt-input"></textarea>
+            </label>
+          </div>
+        </section>
+      </form>
+
+      <section class="panel">
+        <div id="prompt-lab-status" class="job-meta">Loading prompt defaults...</div>
+      </section>
+    </main>
+
+    <script src="/static/prompt_lab.js?v=20260421-1"></script>
+  </body>
+</html>

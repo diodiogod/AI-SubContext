@@ -180,5 +180,16 @@ class ModelListResponse(BaseModel):
     message: str
 
 
+class RuntimeDefaultsResponse(BaseModel):
+    max_completion_tokens: int
+    request_timeout_seconds: int
+    prompt_translation_system: str
+    prompt_translation_strict_retry: str
+    prompt_initial_context_system: str
+    prompt_full_context_refresh_system: str
+    prompt_batch_context_refresh_system: str
+    prompt_line_revision_system: str
+
+
 class UpdateContextRequest(BaseModel):
     session_context: dict[str, Any]

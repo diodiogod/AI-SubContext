@@ -162,6 +162,12 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.02),
     0 16px 30px rgba(0, 0, 0, 0.12);
 }
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.95fr);
@@ -178,6 +184,9 @@ body {
 }
 .field-grid-controls {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.field-grid-prompt-lab {
+  grid-template-columns: repeat(1, minmax(0, 1fr));
 }
 .field-span-2 {
   grid-column: span 2;
@@ -359,6 +368,48 @@ label {
   justify-content: space-between;
   gap: 0.7rem;
 }
+.console-tabs {
+  display: inline-flex;
+  gap: 0.45rem;
+  padding: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.console-tab-button {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.82rem;
+  box-shadow: none;
+}
+.console-tab-button.ghost {
+  border-color: transparent;
+}
+.console-tab-button.active {
+  background: linear-gradient(135deg, rgba(120, 230, 222, 0.22), rgba(80, 196, 188, 0.3));
+  color: var(--text);
+}
+.console-tab-panel {
+  display: grid;
+  gap: 0.85rem;
+}
+.prompt-lab-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.prompt-lab-head .job-meta {
+  margin: 0;
+}
+.prompt-lab-flow {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.prompt-lab-flow p {
+  margin: 0.35rem 0 0;
+}
 .model-list-label {
   margin-top: 0.1rem;
 }
@@ -395,6 +446,9 @@ textarea {
   min-height: 26rem;
   resize: vertical;
   font-family: "IBM Plex Mono", "Consolas", monospace;
+}
+.prompt-input {
+  min-height: 10rem;
 }
 button {
   border: 0;
@@ -439,6 +493,10 @@ a.link-button {
 a.link-button:hover {
   transform: translateY(-1px);
   box-shadow: 0 12px 26px rgba(120, 230, 222, 0.12);
+}
+.panel-link-button {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.82rem;
 }
 .model-status {
   margin-top: -0.15rem;
@@ -503,6 +561,9 @@ button.danger {
 }
 .connection-result {
   min-height: 1.4rem;
+  margin-top: -0.1rem;
+}
+.prompt-lab-summary {
   margin-top: -0.1rem;
 }
 .job-list {
@@ -1477,6 +1538,13 @@ code {
   }
   .jobs-summary {
     grid-template-columns: 1fr;
+  }
+  .section-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .prompt-lab-head {
+    flex-direction: column;
   }
 }
 @media (prefers-reduced-motion: reduce) {

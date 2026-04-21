@@ -676,13 +676,27 @@ class JobManager:
 
     def resume(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
-        if not job or job.status != JobStatus.PAUSED:
+        if not job or job.status not in {JobStatus.PAUSED, JobStatus.FAILED}:
             return False
+        if job.job_kind == "review":
+            return False
+        was_failed = job.status == JobStatus.FAILED
         job.status = JobStatus.QUEUED
         job.pause_requested = False
         job.stop_requested = False
-        job.message = "Queued to resume translation"
-        self._append_log(job, "info", "Job resumed", save=False)
+        job.completed_at = None
+        job.error = None
+        if was_failed:
+            job.message = f"Queued to resume from batch {job.current_batch + 1}"
+            self._append_log(
+                job,
+                "info",
+                f"Failed job resumed from batch {job.current_batch + 1}",
+                save=False,
+            )
+        else:
+            job.message = "Queued to resume translation"
+            self._append_log(job, "info", "Job resumed", save=False)
         self._start_task(job_id)
         self._save_state()
         return True
@@ -813,11 +827,12 @@ class JobManager:
             self._append_log(job, "info", "Translation completed", save=False)
             self._save_state()
         except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
             job.status = JobStatus.FAILED
-            job.error = str(exc)
+            job.error = error_text
             job.completed_at = datetime.now(timezone.utc)
-            job.message = f"Translation failed: {exc}"
-            self._append_log(job, "error", f"Translation failed: {exc}", save=False)
+            job.message = f"Translation failed: {error_text}"
+            self._append_log(job, "error", f"Translation failed: {error_text}", save=False)
             self._save_state()
         finally:
             self.tasks.pop(job_id, None)
