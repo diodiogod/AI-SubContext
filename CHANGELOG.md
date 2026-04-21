@@ -5,6 +5,22 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-04-21
+
+### Added
+
+- Translation context updates now visually highlight only the fields that changed
+- Previous context snapshots stay collapsed by default and remain open while you inspect them
+- The verbose log no longer snaps you away while reading older entries
+- Failed jobs now show clearer invalid-JSON model errors instead of raw parser exceptions
+
+### Changed
+
+- Improve live context feedback and failure diagnostics
+
+### Fixed
+
+- Job error text can be copied without accidentally opening the review workspace
 ## [0.2.0] - 2026-04-21
 
 ### Added
