@@ -1,0 +1,32 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Virtual environments used by the launchers
+venv/
+venv-linux/
+venv-win/
+
+# Runtime data and logs
+data/jobs.json
+*.log
+subtitle_studio_setup.log
+
+# Local environment files
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local comparison repos and scratch work
+ignored/

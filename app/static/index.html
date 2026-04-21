@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI SubContext</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css?v=20260420-16" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">AI SubContext</p>
+          <h1>Focused subtitle translation with live context control.</h1>
+          <p class="lede">
+            Drop an <code>.srt</code>, pick languages and model, watch the context card update, and intervene when needed.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel panel-form">
+        <div class="panel-banner">
+          <div>
+            <div class="mini-eyebrow">Translation Console</div>
+            <h2>Prepare the file, model, and runtime controls.</h2>
+          </div>
+        </div>
+        <form id="job-form" class="form-layout">
+          <div class="file-field form-section">
+            <div class="mini-eyebrow">Subtitle File</div>
+            <label id="drop-zone" class="drop-zone" for="file">
+              <input type="file" id="file" accept=".srt" required hidden />
+              <div class="drop-title">Drop an <code>.srt</code> here</div>
+              <div class="drop-subtitle">or click to browse</div>
+              <div id="selected-file" class="selected-file">No file selected</div>
+            </label>
+            <label
+              id="translated-drop-zone"
+              class="secondary-file"
+              for="translated_file"
+              title="Optional. Load an already translated subtitle to run validation and review without retranslating the whole file."
+            >
+              <input type="file" id="translated_file" accept=".srt" hidden />
+              <span class="secondary-file-label">Translated File for Review</span>
+              <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
+            </label>
+          </div>
+
+          <div class="form-section">
+            <div class="mini-eyebrow">Translation Setup</div>
+            <div class="field-grid field-grid-primary">
+              <label class="field-span-2">
+                <span class="label-row">Title <span class="info-dot" title="Optional movie or episode title. Helps the model infer stable context like setting, genre, and recurring names.">?</span></span>
+                <input type="text" id="title" placeholder="Optional movie title" />
+              </label>
+              <label>
+                <span class="label-row">Source Language <span class="info-dot" title="Language of the original subtitle file. Use short codes like en, es, pt-BR. Wrong source language weakens validation and glossary handling.">?</span></span>
+                <input type="text" id="source_language" value="en" required />
+              </label>
+              <label>
+                <span class="label-row">Target Language <span class="info-dot" title="Language you want in the final subtitle. Use codes like pt-BR, es, fr. Validation checks whether output moved away from the source and toward this target.">?</span></span>
+                <input type="text" id="target_language" value="pt-BR" required />
+              </label>
+              <label class="field-span-full">
+                <span class="label-row">Base URL <span class="info-dot" title="OpenAI-compatible API endpoint, local or remote. Local models give more control; remote endpoints may be stronger but depend on network and provider limits.">?</span></span>
+                <input type="text" id="base_url" value="http://127.0.0.1:1234/v1" required />
+              </label>
+            </div>
+          </div>
+
+          <div class="workspace-grid">
+            <div class="form-section model-section">
+              <div class="mini-eyebrow">Model Selection</div>
+              <label class="model-field">
+                <span class="label-row">Model <span class="info-dot" title="Model used for translation and context updates. Stronger models usually give fewer untranslated lines; weaker local models may need smaller batches and more retries.">?</span></span>
+                <input type="text" id="model" list="model-history" value="google/gemma-4-e4b" required />
+                <datalist id="model-history"></datalist>
+                <div class="model-picker">
+                  <div class="model-picker-head">
+                    <div class="mini-eyebrow model-list-label">LM Studio Models</div>
+                    <button
+                      type="button"
+                      id="load-models-btn"
+                      class="ghost small"
+                      title="Fetch models from the current endpoint. Useful to confirm the endpoint is reachable and pick an exact installed model id."
+                    >
+                      Load
+                    </button>
+                  </div>
+                  <select id="model-select">
+                    <option value="">Load models to choose one</option>
+                  </select>
+                  <div id="model-list-status" class="job-meta model-status"></div>
+                </div>
+              </label>
+            </div>
+
+            <div class="form-section controls-section">
+              <div class="mini-eyebrow">Runtime Controls</div>
+              <div class="field-grid field-grid-controls">
+                <label class="field-span-full">
+                  <span class="label-row">API Key <span class="info-dot" title="Auth token for the endpoint. Local tools like LM Studio often accept any placeholder; remote APIs usually require a real key.">?</span></span>
+                  <input type="text" id="api_key" value="lm-studio" />
+                </label>
+                <label>
+                  <span class="label-row">Batch Size <span class="info-dot" title="How many subtitle lines are sent in one request. Higher is faster and gives more local context, but increases failure risk on weak models. Lower is slower but safer.">?</span></span>
+                  <input type="number" id="batch_size" min="1" max="100" value="10" />
+                </label>
+                <label>
+                  <span class="label-row">Temperature <span class="info-dot" title="Controls randomness. Lower is more stable and consistent for translation. Higher can help with nuance, but also increases drift and inconsistent wording.">?</span></span>
+                  <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.2" />
+                </label>
+              </div>
+              <label
+                class="checkbox checkbox-card"
+                title="Keeps a rolling card with scene context, characters, glossary, and ambiguities. Better consistency, but weak models may sometimes update it badly."
+              >
+                <input type="checkbox" id="structured_context" checked />
+                <span>
+                  <strong>Use structured context</strong>
+                  <small>Carry scene, glossary, and character state across batches.</small>
+                </span>
+              </label>
+              <div id="connection-test-result" class="job-meta connection-result"></div>
+              <div class="actions action-stack">
+                <button type="submit" title="Start a translation job using the current file, model, and runtime settings.">
+                  Translate Subtitle
+                </button>
+                <button
+                  type="button"
+                  id="review-existing-btn"
+                  class="ghost"
+                  title="Run the validator on a source subtitle plus an already translated subtitle. Useful for checking leftover source-language lines and fixing them manually."
+                >
+                  Validate Existing Translation
+                </button>
+                <button
+                  type="button"
+                  id="test-connection-btn"
+                  class="ghost"
+                  title="Check whether the endpoint is reachable and whether the selected model appears available."
+                >
+                  Test Connection
+                </button>
+              </div>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section id="active-job-card" class="panel hidden"></section>
+      <section class="panel panel-jobs">
+        <div class="panel-head">
+          <h2>Jobs</h2>
+          <div class="actions">
+            <button id="clear-finished-btn" class="ghost" title="Remove completed, failed, and cancelled jobs from the list.">Clear Finished</button>
+            <button id="refresh-btn" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <div id="jobs"></div>
+      </section>
+    </main>
+
+    <dialog id="context-dialog">
+      <form method="dialog" class="dialog-form snapshot-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Context Editor</div>
+            <h2 id="context-dialog-title">Edit Context</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="context-dialog-body" class="snapshot-dialog-body"></div>
+        <div class="actions">
+          <button type="button" id="generate-context-btn" class="ghost">Generate Card</button>
+          <button type="button" id="save-context-btn">Save Context</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="detail-dialog">
+      <form method="dialog" class="dialog-form detail-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Context Details</div>
+            <h2 id="detail-dialog-title">Details</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="detail-dialog-body" class="detail-dialog-body"></div>
+      </form>
+    </dialog>
+
+    <dialog id="log-dialog">
+      <form method="dialog" class="dialog-form detail-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Verbose Log</div>
+            <h2 id="log-dialog-title">Job Log</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="log-dialog-body" class="log-dialog-body"></div>
+      </form>
+    </dialog>
+
+    <dialog id="review-dialog">
+      <form method="dialog" class="dialog-form review-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Line Review</div>
+            <h2 id="review-dialog-title">Review Lines</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="review-dialog-body" class="review-dialog-body"></div>
+      </form>
+    </dialog>
+
+    <dialog id="snapshot-dialog">
+      <form method="dialog" class="dialog-form snapshot-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Batch Snapshot</div>
+            <h2 id="snapshot-dialog-title">Batch Card</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="snapshot-dialog-body" class="snapshot-dialog-body"></div>
+        <div class="actions">
+          <button type="button" id="generate-snapshot-btn" class="ghost">Generate Card</button>
+          <button type="button" id="save-snapshot-btn">Save Batch Card</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/app.js?v=20260420-16"></script>
+  </body>
+  </html>

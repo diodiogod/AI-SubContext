@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI SubContext Review Workspace</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css?v=20260421-1" />
+  </head>
+  <body>
+    <main class="shell review-shell">
+      <section class="panel review-header">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Review Workspace</div>
+            <h1 id="review-page-title">Subtitle Review</h1>
+            <div id="review-page-meta" class="job-meta">Loading job...</div>
+          </div>
+          <div class="actions">
+            <a class="ghost link-button" href="/">Back To Console</a>
+            <button type="button" id="review-page-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <div class="review-toolbar">
+          <div class="review-filter-row" id="review-page-filters"></div>
+          <div class="review-toolbar-actions">
+            <input id="review-search" type="search" placeholder="Search source, translation, status, or reason" />
+            <button type="button" id="review-prev-flagged" class="ghost">Prev Flagged</button>
+            <button type="button" id="review-next-flagged" class="ghost">Next Flagged</button>
+            <button
+              type="button"
+              id="review-auto-rewrite-next"
+              title="Retranslate all visible suspect or error lines one by one. It uses the current filter and search, and you can stop the run mid-way."
+            >
+              Auto Rewrite All
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="review-layout">
+        <section class="panel review-table-panel">
+          <div id="review-table-summary" class="job-meta"></div>
+          <div class="review-table-wrap">
+            <table class="review-table">
+              <thead>
+                <tr>
+                  <th>Line</th>
+                  <th>Time</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                  <th>Source</th>
+                  <th>Translation</th>
+                  <th>Batch</th>
+                </tr>
+              </thead>
+              <tbody id="review-table-body">
+                <tr><td colspan="7" class="job-meta">Loading lines...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="panel review-side-panel">
+          <div id="review-side-body" class="review-side-body">
+            <p class="job-meta">Select a line to review it here.</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <dialog id="review-snapshot-dialog">
+      <form method="dialog" class="dialog-form snapshot-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Batch Card</div>
+            <h2 id="review-snapshot-title">Batch Card</h2>
+          </div>
+          <button value="cancel" class="ghost">Close</button>
+        </div>
+        <div id="review-snapshot-body" class="snapshot-dialog-body"></div>
+        <div class="actions">
+          <button type="button" id="review-generate-snapshot" class="ghost">Generate Card</button>
+          <button type="button" id="review-save-snapshot">Save Batch Card</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/review.js?v=20260421-1"></script>
+  </body>
+  </html>
