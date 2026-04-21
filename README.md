@@ -9,7 +9,7 @@
 
 # AI SubContext v0.2.2
 
-Focused subtitle translation with live context control.
+Make quality subtitles with live context control using local models.
 
 Drop an `.srt`, pick languages and model, watch the context card update, and intervene when needed.
 
@@ -39,6 +39,8 @@ Drop an `.srt`, pick languages and model, watch the context card update, and int
 AI SubContext uses a large language model to translate subtitle files with context awareness, preserving meaning, terminology, and character consistency across an entire script instead of treating each line in isolation. It supports local or remote OpenAI-compatible endpoints, keeps a rolling context card while translation runs in batches, and gives you direct review tools when you need to inspect, fix, or retranslate individual lines.
 
 Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using [HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive](https://huggingface.co/HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive).
+
+AI SubContext was developed with inspiration from Bazarr workflows and [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator).
 
 ## Features
 
