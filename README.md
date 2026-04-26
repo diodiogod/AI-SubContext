@@ -40,8 +40,6 @@ AI SubContext uses a large language model to translate subtitle files with conte
 
 Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using [HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive](https://huggingface.co/HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive).
 
-AI SubContext was developed with inspiration from Bazarr workflows and [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator).
-
 ## Features
 
 ### Translation
@@ -50,7 +48,7 @@ AI SubContext was developed with inspiration from Bazarr workflows and [LavX/ai-
 - choose source language, target language, model, and base URL
 - add secondary subtitle languages as aligned reference tracks to help the model resolve ambiguity
 - process subtitles in batches with live status and progress tracking
-- validate an already translated `.srt` against the source without retranslating the whole file
+- validate an already translated `.srt` against the source without retranslating the whole file to fix or check untranslated segments.
 
 ### Context Control
 
@@ -99,3 +97,6 @@ Linux:
 - Settings are stored in browser local storage for convenience.
 - Jobs are persisted to `data/jobs.json`, and unfinished translation jobs are restored as paused on startup.
 - Review imports detect and ignore AI SubContext's own branded footer subtitle automatically.
+
+- AI SubContext was developed with inspiration from Bazarr workflows and [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator).
+
