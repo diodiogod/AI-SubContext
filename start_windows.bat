@@ -4,6 +4,7 @@ setlocal enabledelayedexpansion
 set LOGFILE=ai_subcontext_setup.log
 set SKIP_GIT=0
 set PORT=7861
+set PORT_SEARCH_LIMIT=20
 
 for %%A in (%*) do (
     if /I "%%~A"=="--skip-git" set SKIP_GIT=1
@@ -78,6 +79,36 @@ if %SHOULD_INSTALL% EQU 1 (
     echo Requirements unchanged, skipping installation
 )
 
-echo Starting AI SubContext on http://127.0.0.1:%PORT%
-set SUBTITLE_STUDIO_PORT=%PORT%
+set START_PORT=%PORT%
+set /a END_PORT=START_PORT+PORT_SEARCH_LIMIT
+set SELECTED_PORT=
+for /l %%P in (%START_PORT%,1,%END_PORT%) do (
+    set "CANDIDATE_PORT=%%P"
+    python -c "import socket, sys; s=socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); s.close()" !CANDIDATE_PORT! >nul 2>nul
+    if not errorlevel 1 (
+        set "SELECTED_PORT=!CANDIDATE_PORT!"
+        goto :port_found
+    )
+)
+
+echo ERROR: Could not find a free port from %START_PORT% to %END_PORT%
+echo Close the app already using the port or start with --port=PORT.
+pause
+exit /b 1
+
+:port_found
+if not "%SELECTED_PORT%"=="%START_PORT%" (
+    echo Port %START_PORT% is busy, switching to %SELECTED_PORT%
+) else (
+    echo Port %SELECTED_PORT% is available
+)
+echo Starting AI SubContext on http://127.0.0.1:%SELECTED_PORT%
+set SUBTITLE_STUDIO_PORT=%SELECTED_PORT%
 python -m app.main
+set APP_EXIT_CODE=%ERRORLEVEL%
+if not "%APP_EXIT_CODE%"=="0" (
+    echo ERROR: Application exited with code %APP_EXIT_CODE%
+    echo Check %LOGFILE% for install or startup errors.
+)
+pause
+exit /b %APP_EXIT_CODE%

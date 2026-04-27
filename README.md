@@ -27,6 +27,7 @@ Drop an `.srt`, pick languages and model, watch the context card update, and int
 ## Quick Links
 
 - Local app URL: `http://127.0.0.1:7861`
+- Windows launcher auto-switches to the next free port if `7861` is already in use.
 - Linux launcher: [`start_linux.sh`](/mnt/j/aitools/subtitle-studio/start_linux.sh)
 - Windows launcher: [`start_windows.bat`](/mnt/j/aitools/subtitle-studio/start_windows.bat)
 - Review Workspace route: `/review/{job_id}`
