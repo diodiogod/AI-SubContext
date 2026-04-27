@@ -23,6 +23,14 @@ class VersionManager:
                         "pattern": r"Current version: v(\d+\.\d+\.\d+)",
                         "template": "Current version: v{version}",
                     },
+                    {
+                        "pattern": r"(https://img\.shields\.io/badge/version-)(\d+\.\d+\.\d+)(-[^)\"]*)",
+                        "template": r"\g<1>{version}\g<3>",
+                    },
+                    {
+                        "pattern": r"(^#\s+AI SubContext v)(\d+\.\d+\.\d+)$",
+                        "template": r"\g<1>{version}",
+                    },
                 ],
             },
             "app/version.py": {
@@ -70,6 +78,7 @@ class VersionManager:
                     replacement["pattern"],
                     replacement["template"].format(version=version),
                     new_content,
+                    flags=re.MULTILINE,
                 )
                 if updated_content != new_content:
                     replaced_any = True

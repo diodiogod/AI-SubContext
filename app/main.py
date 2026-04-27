@@ -286,7 +286,10 @@ async def update_context(job_id: str, request: UpdateContextRequest) -> dict:
 
 @app.post("/api/jobs/{job_id}/context/generate", response_model=GenerateContextResponse)
 async def generate_job_context(job_id: str) -> GenerateContextResponse:
-    context = await job_manager.generate_job_context(job_id)
+    try:
+        context = await job_manager.generate_job_context(job_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Context generation failed: {exc}") from exc
     if not context:
         raise HTTPException(status_code=404, detail="Job not found")
     return GenerateContextResponse(session_context=context)
@@ -306,7 +309,10 @@ async def update_batch_context_snapshot(job_id: str, batch_index: int, request: 
 
 @app.post("/api/jobs/{job_id}/batch-context/{batch_index}/generate", response_model=GenerateContextResponse)
 async def generate_batch_context_snapshot(job_id: str, batch_index: int) -> GenerateContextResponse:
-    context = await job_manager.generate_batch_context_snapshot(job_id, batch_index)
+    try:
+        context = await job_manager.generate_batch_context_snapshot(job_id, batch_index)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Batch context generation failed: {exc}") from exc
     if not context:
         raise HTTPException(status_code=404, detail="Batch context snapshot not found")
     return GenerateContextResponse(session_context=context)

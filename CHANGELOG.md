@@ -5,6 +5,22 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-04-27
+
+### Added
+
+- Context card premise now clearly targets whole-movie context
+- Premise is labeled as Whole Movie Premise in editor and review views
+- Release automation now handles current README version markers
+
+### Changed
+
+- Improve context card quality and troubleshooting
+
+### Fixed
+
+- Fixed a server-side error path that could break Generate Card
+- Generation failures now show actionable error details instead of generic alerts
 ## [0.2.2] - 2026-04-21
 
 ### Added

@@ -370,6 +370,26 @@ function saveSettings() {
   }
 }
 
+async function responseErrorDetail(response, fallbackMessage) {
+  try {
+    const data = await response.json();
+    if (data && typeof data === "object") {
+      if (typeof data.detail === "string" && data.detail.trim()) return data.detail.trim();
+      if (Array.isArray(data.detail) && data.detail.length) return fallbackMessage;
+      if (typeof data.message === "string" && data.message.trim()) return data.message.trim();
+    }
+  } catch (_) {
+    // Fall through to plain text
+  }
+  try {
+    const text = await response.text();
+    if (text && text.trim()) return text.trim();
+  } catch (_) {
+    // Ignore and return fallback
+  }
+  return fallbackMessage;
+}
+
 function collectSettingsPayload() {
   const payload = { ...runtimeDefaults, ...readStoredSettings() };
   for (const element of form.elements) {
@@ -1892,7 +1912,7 @@ async function generateSnapshotContext() {
   generateSnapshotBtn.disabled = false;
   generateSnapshotBtn.textContent = "Generate Card";
   if (!response.ok) {
-    alert("Could not generate batch card.");
+    alert(await responseErrorDetail(response, "Could not generate batch card."));
     return;
   }
   const data = await response.json();
@@ -1939,7 +1959,7 @@ async function generateMainContext() {
   generateContextBtn.disabled = false;
   generateContextBtn.textContent = "Generate Card";
   if (!response.ok) {
-    alert("Could not generate context card.");
+    alert(await responseErrorDetail(response, "Could not generate context card."));
     return;
   }
   const data = await response.json();
