@@ -696,7 +696,7 @@ function renderSessionSnapshot(snapshot, compact = false, delta = null) {
     <div class="${updateClassName("context-card", Boolean(delta?.hasChanges))}">
       ${snapshot.premise ? `
         <div class="${updateClassName("tile", changedFields.has("premise"))}">
-          <div class="mini-eyebrow">Premise</div>
+          <div class="mini-eyebrow">Whole Movie Premise</div>
           <p>${escapeHtml(snapshot.premise)}</p>
         </div>
       ` : ""}
@@ -856,7 +856,7 @@ function renderContextEditor(scope, context, options = {}) {
           <input type="hidden" data-context-field="source_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.source_language || "")}" />
           <input type="hidden" data-context-field="target_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.target_language || "")}" />
           <label class="field-span-full">
-            <span class="label-row">Premise</span>
+            <span class="label-row">Whole Movie Premise</span>
             <textarea data-context-field="premise" data-context-scope="${escapeHtml(scope)}">${escapeHtml(normalized.premise)}</textarea>
           </label>
           <label>

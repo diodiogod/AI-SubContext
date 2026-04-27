@@ -230,7 +230,7 @@ function renderSessionSnapshot(snapshot, compact = false) {
   const ambiguities = snapshot.unresolved_ambiguities || [];
   return `
     <div class="context-card">
-      ${snapshot.premise ? `<div class="tile"><div class="mini-eyebrow">Premise</div><p>${escapeHtml(snapshot.premise)}</p></div>` : ""}
+      ${snapshot.premise ? `<div class="tile"><div class="mini-eyebrow">Whole Movie Premise</div><p>${escapeHtml(snapshot.premise)}</p></div>` : ""}
       ${snapshot.tone ? `<div class="tile"><div class="mini-eyebrow">Tone</div><p>${escapeHtml(snapshot.tone)}</p></div>` : ""}
       ${snapshot.scene_context ? `<div class="scene"><div class="mini-eyebrow">Scene</div><div>${escapeHtml(snapshot.scene_context)}</div></div>` : ""}
       ${styleNotes.length ? `<div class="tile"><div class="mini-eyebrow">Style Notes</div><ul>${styleNotes.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
@@ -340,7 +340,7 @@ function renderContextEditor(scope, context, meta = "") {
           <input type="hidden" data-context-field="source_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.source_language || "")}" />
           <input type="hidden" data-context-field="target_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.target_language || "")}" />
           <label class="field-span-full">
-            <span class="label-row">Premise</span>
+            <span class="label-row">Whole Movie Premise</span>
             <textarea data-context-field="premise" data-context-scope="${escapeHtml(scope)}">${escapeHtml(normalized.premise)}</textarea>
           </label>
           <label>
