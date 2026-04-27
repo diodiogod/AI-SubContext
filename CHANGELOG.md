@@ -5,6 +5,22 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-04-27
+
+### Added
+
+- You can now edit target language tips directly inside Edit Context and reuse them across jobs
+- Context updates can now be applied for retranslations on completed jobs, not only active batches
+- Translation context now shows a clearer live visual cue while model calls are running
+
+### Changed
+
+- Improve translation context control and feedback
+- The context editor better distinguishes whole-movie premise from scene context
+
+### Removed
+
+- A saved tips history dropdown makes it faster to apply or remove past language guidance
 ## [0.2.3] - 2026-04-27
 
 ### Added

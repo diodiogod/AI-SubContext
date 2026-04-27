@@ -115,6 +115,7 @@ async def create_job(
     model: str = Form(...),
     source_language: str = Form(...),
     target_language: str = Form(...),
+    target_language_tips: str = Form(default=""),
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
@@ -139,6 +140,7 @@ async def create_job(
             model=model,
             source_language=source_language,
             target_language=target_language,
+            target_language_tips=target_language_tips,
             title=title or file.filename.rsplit(".", 1)[0],
             batch_size=batch_size,
             temperature=temperature,
@@ -180,6 +182,7 @@ async def create_review_job(
     model: str = Form(...),
     source_language: str = Form(...),
     target_language: str = Form(...),
+    target_language_tips: str = Form(default=""),
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
@@ -206,6 +209,7 @@ async def create_review_job(
             model=model,
             source_language=source_language,
             target_language=target_language,
+            target_language_tips=target_language_tips,
             title=title or translated_file.filename.rsplit(".", 1)[0],
             batch_size=batch_size,
             temperature=temperature,
@@ -278,7 +282,7 @@ async def update_context(job_id: str, request: UpdateContextRequest) -> dict:
         context = SessionContext(**request.session_context)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
-    if not job_manager.update_context(job_id, context):
+    if not job_manager.update_context(job_id, context, request.target_language_tips):
         raise HTTPException(status_code=409, detail="Job context cannot be updated")
     job = job_manager.get_job(job_id)
     return job.model_dump(mode="json")

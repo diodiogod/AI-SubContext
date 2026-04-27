@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260421-10" />
+    <link rel="stylesheet" href="/static/app.css?v=20260427-3" />
   </head>
   <body>
     <main class="shell">
@@ -84,6 +84,27 @@
               <label>
                 <span class="label-row">Target Language <span class="info-dot" title="Language you want in the final subtitle. Use codes like pt-BR, es, fr. Validation checks whether output moved away from the source and toward this target.">?</span></span>
                 <input type="text" id="target_language" value="pt-BR" required />
+              </label>
+              <label class="field-span-full">
+                <span class="label-row">Target Language Tips <span class="info-dot" title="Optional guidance about local language usage and register. Example: pt-BR only, avoid 'tu', prefer neutral Brazilian wording, avoid Portugal Portuguese forms.">?</span></span>
+                <div class="tips-history" data-tips-history-root="setup">
+                  <div class="tips-history-input-row">
+                    <input
+                      type="text"
+                      id="target_language_tips"
+                      data-tips-input="setup"
+                      placeholder="Optional language-specific tips for the model"
+                    />
+                    <button
+                      type="button"
+                      class="ghost small tips-history-toggle"
+                      data-tips-history-toggle="setup"
+                      aria-expanded="false"
+                      title="Open saved language tips"
+                    >History</button>
+                  </div>
+                  <div class="tips-history-menu" data-tips-history-menu="setup"></div>
+                </div>
               </label>
               <label class="field-span-full">
                 <span class="label-row">Base URL <span class="info-dot" title="OpenAI-compatible API endpoint, local or remote. Local models give more control; remote endpoints may be stronger but depend on network and provider limits.">?</span></span>
@@ -277,6 +298,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260421-6"></script>
+    <script src="/static/app.js?v=20260427-10"></script>
   </body>
-  </html>
+</html>

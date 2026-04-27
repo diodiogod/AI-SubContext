@@ -425,6 +425,21 @@ def _effective_max_completion_tokens(settings: TranslationSettings) -> int:
     return max(128, int(getattr(settings, "max_completion_tokens", DEFAULT_MAX_COMPLETION_TOKENS) or DEFAULT_MAX_COMPLETION_TOKENS))
 
 
+def _target_language_tips(settings: TranslationSettings) -> str:
+    return str(getattr(settings, "target_language_tips", "") or "").strip()
+
+
+def _with_target_language_tips(system_instruction: str, settings: TranslationSettings) -> str:
+    tips = _target_language_tips(settings)
+    if not tips:
+        return system_instruction
+    return (
+        f"{system_instruction} "
+        "Target-language tips (apply unless they conflict with source meaning): "
+        f"{tips}"
+    )
+
+
 def _session_context_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -1085,7 +1100,10 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": _effective_prompt(settings, "prompt_initial_context_system", DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT),
+                "content": _with_target_language_tips(
+                    _effective_prompt(settings, "prompt_initial_context_system", DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT),
+                    settings,
+                ),
             },
             {
                 "role": "user",
@@ -1131,10 +1149,13 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": _effective_prompt(
+                "content": _with_target_language_tips(
+                    _effective_prompt(
+                        settings,
+                        "prompt_full_context_refresh_system",
+                        DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT,
+                    ),
                     settings,
-                    "prompt_full_context_refresh_system",
-                    DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT,
                 ),
             },
             {
@@ -1177,10 +1198,13 @@ class OpenAICompatibleTranslator:
         messages = [
             {
                 "role": "system",
-                "content": _effective_prompt(
+                "content": _with_target_language_tips(
+                    _effective_prompt(
+                        settings,
+                        "prompt_batch_context_refresh_system",
+                        DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT,
+                    ),
                     settings,
-                    "prompt_batch_context_refresh_system",
-                    DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT,
                 ),
             },
             {
@@ -1302,7 +1326,10 @@ class OpenAICompatibleTranslator:
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         extra_instruction: str = "",
     ) -> tuple[list[SubtitleLine], SessionContext | None]:
-        system_instruction = _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT)
+        system_instruction = _with_target_language_tips(
+            _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT),
+            settings,
+        )
         if extra_instruction:
             system_instruction += " " + extra_instruction
 
@@ -1361,7 +1388,10 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
     ) -> tuple[SubtitleLine, BatchProcessingStats]:
-        system_instruction = _effective_prompt(settings, "prompt_line_revision_system", DEFAULT_LINE_REVISION_SYSTEM_PROMPT)
+        system_instruction = _with_target_language_tips(
+            _effective_prompt(settings, "prompt_line_revision_system", DEFAULT_LINE_REVISION_SYSTEM_PROMPT),
+            settings,
+        )
         if extra_instruction.strip():
             system_instruction += " Additional instruction: " + extra_instruction.strip()
 

@@ -1,6 +1,11 @@
 const STORAGE_KEY = "ai-subcontext-settings";
 const MODEL_HISTORY_KEY = "ai-subcontext-model-history";
+const MODEL_CALL_STATS_KEY = "ai-subcontext-model-call-stats";
+const LANGUAGE_TIPS_HISTORY_KEY = "ai-subcontext-language-tips-history";
 const MAX_MODEL_HISTORY = 10;
+const MAX_LANGUAGE_TIPS_HISTORY = 20;
+const LANGUAGE_TIPS_TARGET_SETUP = "setup";
+const LANGUAGE_TIPS_TARGET_MAIN = "context-main";
 const form = document.getElementById("job-form");
 const jobsEl = document.getElementById("jobs");
 const refreshBtn = document.getElementById("refresh-btn");
@@ -59,12 +64,96 @@ let remoteModelOptions = [];
 const reviewDrafts = new Map();
 const reviewInstructionDrafts = new Map();
 const contextEditorDrafts = new Map();
+const contextLanguageTipsDrafts = new Map();
 let referenceTrackCounter = 0;
 let initialCardEstimateToken = 0;
 let sourceSubtitleTextStats = null;
 let runtimeDefaults = {};
 const expandedContextHistory = new Set();
 const renderedContextSnapshots = new Map();
+const modelCallParserState = new Map();
+const modelCallRenderedState = new Map();
+const modelCallAnimation = { jobId: null, rafId: null };
+
+function readModelCallStats() {
+  const raw = localStorage.getItem(MODEL_CALL_STATS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+let modelCallStats = readModelCallStats();
+
+function writeModelCallStats() {
+  localStorage.setItem(MODEL_CALL_STATS_KEY, JSON.stringify(modelCallStats));
+}
+
+function modelCallSignature(job) {
+  const model = String(job?.settings?.model || "unknown").trim() || "unknown";
+  const batchSize = Math.max(1, Number(job?.settings?.batch_size || 0) || 0);
+  return `${model}::b${batchSize}`;
+}
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function addModelCallDuration(job, seconds) {
+  const duration = Number(seconds);
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const signature = modelCallSignature(job);
+  const bucket = modelCallStats[signature] || { samples: [] };
+  const samples = Array.isArray(bucket.samples) ? bucket.samples : [];
+  samples.push(Math.max(1, Math.min(900, Math.round(duration))));
+  bucket.samples = samples.slice(-40);
+  modelCallStats[signature] = bucket;
+  writeModelCallStats();
+}
+
+function learnModelCallDurations(job) {
+  const logs = Array.isArray(job?.logs) ? job.logs : [];
+  if (!logs.length) return;
+  const state = modelCallParserState.get(job.id) || { processed: 0, pendingByBatch: {} };
+  const pendingByBatch = state.pendingByBatch || {};
+  const startPattern = /Submitting batch to model|Retrying batch with stricter translation instruction|Starting batch /;
+  const endPattern = /Validation after attempt|Model request timed out after/;
+
+  for (let index = state.processed; index < logs.length; index += 1) {
+    const entry = logs[index];
+    const batch = Number(entry?.batch_index);
+    if (!Number.isFinite(batch) || batch <= 0) continue;
+    const message = String(entry?.message || "");
+    const timeMs = Date.parse(String(entry?.timestamp || ""));
+    if (!Number.isFinite(timeMs)) continue;
+
+    if (startPattern.test(message)) {
+      const queue = Array.isArray(pendingByBatch[batch]) ? pendingByBatch[batch] : [];
+      queue.push(timeMs);
+      pendingByBatch[batch] = queue;
+      continue;
+    }
+
+    if (endPattern.test(message)) {
+      const queue = Array.isArray(pendingByBatch[batch]) ? pendingByBatch[batch] : [];
+      if (queue.length) {
+        const startMs = queue.shift();
+        if (Number.isFinite(startMs) && timeMs > startMs) {
+          addModelCallDuration(job, (timeMs - startMs) / 1000);
+        }
+        pendingByBatch[batch] = queue;
+      }
+    }
+  }
+
+  modelCallParserState.set(job.id, { processed: logs.length, pendingByBatch });
+}
 
 const PROMPT_FIELD_IDS = [
   "prompt_translation_system",
@@ -204,6 +293,115 @@ function scopeDraftKey(scope, jobId, batchIndex = "") {
 
 function normalizeModelName(value) {
   return String(value || "").trim();
+}
+
+function normalizeLanguageTip(value) {
+  return String(value || "").trim();
+}
+
+function readLanguageTipsHistory() {
+  const raw = localStorage.getItem(LANGUAGE_TIPS_HISTORY_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(normalizeLanguageTip).filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeLanguageTipsHistory(entries) {
+  const unique = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const tip = normalizeLanguageTip(entry);
+    if (!tip || seen.has(tip)) continue;
+    seen.add(tip);
+    unique.push(tip);
+    if (unique.length >= MAX_LANGUAGE_TIPS_HISTORY) break;
+  }
+  localStorage.setItem(LANGUAGE_TIPS_HISTORY_KEY, JSON.stringify(unique));
+  renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
+  renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_MAIN, contextDialogBody || document);
+  return unique;
+}
+
+function rememberLanguageTip(value) {
+  const tip = normalizeLanguageTip(value);
+  if (!tip) return;
+  const history = [tip, ...readLanguageTipsHistory().filter(entry => entry !== tip)];
+  writeLanguageTipsHistory(history);
+}
+
+function forgetLanguageTip(value) {
+  const tip = normalizeLanguageTip(value);
+  if (!tip) return;
+  writeLanguageTipsHistory(readLanguageTipsHistory().filter(entry => entry !== tip));
+}
+
+function renderLanguageTipsHistoryMenu(target, root = document) {
+  const menu = root.querySelector(`[data-tips-history-menu="${target}"]`);
+  if (!menu) return;
+  const history = readLanguageTipsHistory();
+  if (!history.length) {
+    menu.innerHTML = `<div class="tips-history-empty">No saved tips yet.</div>`;
+    return;
+  }
+  menu.innerHTML = history.map(tip => `
+    <div class="tips-history-item">
+      <button
+        type="button"
+        class="tips-history-apply"
+        data-tips-history-apply="${escapeHtml(target)}"
+        data-tip-value="${escapeHtml(tip)}"
+        title="${escapeHtml(tip)}"
+      >${escapeHtml(tip)}</button>
+      <button
+        type="button"
+        class="tips-history-delete"
+        data-tips-history-delete="${escapeHtml(target)}"
+        data-tip-value="${escapeHtml(tip)}"
+        title="Delete this tip from history"
+        aria-label="Delete tip"
+      >×</button>
+    </div>
+  `).join("");
+}
+
+function closeLanguageTipsMenus() {
+  for (const menu of document.querySelectorAll("[data-tips-history-menu]")) {
+    menu.classList.remove("open");
+  }
+  for (const toggle of document.querySelectorAll("[data-tips-history-toggle]")) {
+    toggle.setAttribute("aria-expanded", "false");
+  }
+}
+
+function rootForTipsTarget(target) {
+  return target === LANGUAGE_TIPS_TARGET_MAIN ? (contextDialogBody || document) : document;
+}
+
+function setLanguageTipsInputValue(target, value) {
+  const root = rootForTipsTarget(target);
+  const input = root.querySelector(`[data-tips-input="${target}"]`);
+  if (!input) return;
+  input.value = normalizeLanguageTip(value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+function toggleLanguageTipsMenu(target) {
+  const root = rootForTipsTarget(target);
+  const menu = root.querySelector(`[data-tips-history-menu="${target}"]`);
+  const toggle = root.querySelector(`[data-tips-history-toggle="${target}"]`);
+  if (!menu || !toggle) return;
+  const nextOpen = !menu.classList.contains("open");
+  closeLanguageTipsMenus();
+  if (nextOpen) {
+    renderLanguageTipsHistoryMenu(target, root);
+    menu.classList.add("open");
+    toggle.setAttribute("aria-expanded", "true");
+  }
 }
 
 function readModelHistory() {
@@ -544,6 +742,106 @@ function formatProgress(value) {
   return `${Math.round(bounded)}%`;
 }
 
+function currentModelCallProgress(job) {
+  if (!job || job.status !== "processing") return null;
+  const totalBatches = Math.max(0, Number(job.total_batches || 0));
+  const currentBatch = Math.max(0, Number(job.current_batch || 0));
+  const activeBatch = totalBatches ? Math.min(totalBatches, currentBatch + 1) : currentBatch + 1;
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  const batchLogs = logs.filter(item => Number(item?.batch_index) === activeBatch);
+  const latestStart = [...batchLogs].reverse().find(item => {
+    const text = String(item?.message || "");
+    return text.includes("Submitting batch to model")
+      || text.includes("Retrying batch with stricter translation instruction")
+      || text.includes("Starting batch ");
+  });
+  const timeoutSeconds = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
+  const startedAtMs = latestStart?.timestamp ? Date.parse(String(latestStart.timestamp)) : NaN;
+  const elapsedSeconds = Number.isFinite(startedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+    : 0;
+  const signature = modelCallSignature(job);
+  const samples = Array.isArray(modelCallStats?.[signature]?.samples) ? modelCallStats[signature].samples : [];
+  const learnedExpectedSeconds = samples.length ? Math.max(4, median(samples)) : null;
+  const defaultExpectedSeconds = Math.max(8, Math.min(45, timeoutSeconds * 0.35));
+  const expectedSeconds = learnedExpectedSeconds || defaultExpectedSeconds;
+  const ratio = expectedSeconds > 0 ? (elapsedSeconds / expectedSeconds) : 0;
+  let estimatedPercent = modelCallPercentFromRatio(ratio);
+  if (!Number.isFinite(startedAtMs)) {
+    estimatedPercent = 8;
+  }
+  estimatedPercent = Math.max(8, Math.min(94, estimatedPercent));
+  const callKey = `${activeBatch}:${Number.isFinite(startedAtMs) ? Math.floor(startedAtMs) : 0}`;
+  return {
+    percent: estimatedPercent,
+    startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : Date.now(),
+    expectedSeconds,
+    callKey,
+  };
+}
+
+function modelCallPercentFromRatio(ratio) {
+  let estimatedPercent = 8;
+  if (ratio <= 1) {
+    estimatedPercent = 8 + ratio * 77;
+  } else {
+    estimatedPercent = 85 + Math.min(9, (ratio - 1) * 18);
+  }
+  return estimatedPercent;
+}
+
+function stopModelCallAnimation() {
+  if (modelCallAnimation.rafId !== null) {
+    cancelAnimationFrame(modelCallAnimation.rafId);
+    modelCallAnimation.rafId = null;
+  }
+  modelCallAnimation.jobId = null;
+}
+
+function animateCurrentModelCallBar(job) {
+  if (!job || !activeJobCard) return;
+  const bar = activeJobCard.querySelector(".js-model-call-progress-bar");
+  if (!bar) {
+    stopModelCallAnimation();
+    modelCallRenderedState.delete(job.id);
+    return;
+  }
+  const target = Math.max(0, Math.min(100, Number(bar.dataset.targetPercent || 0) || 0));
+  const startedAtMs = Math.max(0, Number(bar.dataset.startedAtMs || Date.now()) || Date.now());
+  const expectedSeconds = Math.max(1, Number(bar.dataset.expectedSeconds || 15) || 15);
+  const callKey = String(bar.dataset.callKey || "");
+  const previous = modelCallRenderedState.get(job.id);
+  const isNewCall = !previous || previous.callKey !== callKey;
+  const start = isNewCall
+    ? Math.max(4, Math.min(18, target * 0.35))
+    : Math.max(0, Math.min(100, Number(previous.percent) || 0));
+
+  bar.style.width = `${start}%`;
+  modelCallRenderedState.set(job.id, { percent: start, callKey });
+
+  stopModelCallAnimation();
+  modelCallAnimation.jobId = job.id;
+
+  const tick = () => {
+    if (modelCallAnimation.jobId !== job.id) return;
+    if (!bar.isConnected) {
+      stopModelCallAnimation();
+      return;
+    }
+    const elapsedSeconds = Math.max(0, (Date.now() - startedAtMs) / 1000);
+    const ratio = expectedSeconds > 0 ? (elapsedSeconds / expectedSeconds) : 0;
+    const computedTarget = Math.max(8, Math.min(94, modelCallPercentFromRatio(ratio)));
+    const state = modelCallRenderedState.get(job.id) || { percent: start, callKey };
+    const current = Number(state.percent ?? start);
+    const next = current + (computedTarget - current) * 0.08;
+    const clamped = Math.max(0, Math.min(94, next));
+    bar.style.width = `${clamped}%`;
+    modelCallRenderedState.set(job.id, { percent: clamped, callKey });
+    modelCallAnimation.rafId = requestAnimationFrame(tick);
+  };
+  modelCallAnimation.rafId = requestAnimationFrame(tick);
+}
+
 function formatTimestamp(value) {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) return "";
@@ -606,6 +904,15 @@ function validationStat(jobId, label, value, className, tooltip, filter) {
       <span class="validation-stat-label">${escapeHtml(label)}</span>
       <strong>${escapeHtml(String(numeric))}</strong>
     </button>
+  `;
+}
+
+function metricStat(label, value, className, tooltip) {
+  return `
+    <div class="validation-stat ${className}" title="${escapeHtml(tooltip)}">
+      <span class="validation-stat-label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </div>
   `;
 }
 
@@ -865,6 +1172,7 @@ function renderGlossaryEditorRow(scope, entry, index) {
 
 function renderContextEditor(scope, context, options = {}) {
   const normalized = normalizeContextInput(context);
+  const languageTips = String(options.targetLanguageTips || "");
   const previewId = `context-preview-${scope}`;
   return `
     ${options.meta || ""}
@@ -875,6 +1183,32 @@ function renderContextEditor(scope, context, options = {}) {
           <input type="hidden" data-context-field="media_type" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.media_type || "Movie")}" />
           <input type="hidden" data-context-field="source_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.source_language || "")}" />
           <input type="hidden" data-context-field="target_language" data-context-scope="${escapeHtml(scope)}" value="${escapeHtml(normalized.target_language || "")}" />
+          ${scope === "main" ? `
+            <label class="field-span-full">
+              <span class="label-row">Target Language Tips</span>
+              <div class="tips-history" data-tips-history-root="${escapeHtml(LANGUAGE_TIPS_TARGET_MAIN)}">
+                <div class="tips-history-input-row">
+                  <input
+                    type="text"
+                    data-context-language-tips
+                    data-context-scope="${escapeHtml(scope)}"
+                    data-tips-input="${escapeHtml(LANGUAGE_TIPS_TARGET_MAIN)}"
+                    value="${escapeHtml(languageTips)}"
+                    placeholder="Optional language-specific tips"
+                    title="Optional guidance about local target-language usage and register. Example: pt-BR only, avoid 'tu', avoid Portugal Portuguese forms."
+                  />
+                  <button
+                    type="button"
+                    class="ghost small tips-history-toggle"
+                    data-tips-history-toggle="${escapeHtml(LANGUAGE_TIPS_TARGET_MAIN)}"
+                    aria-expanded="false"
+                    title="Open saved language tips"
+                  >History</button>
+                </div>
+                <div class="tips-history-menu" data-tips-history-menu="${escapeHtml(LANGUAGE_TIPS_TARGET_MAIN)}"></div>
+              </div>
+            </label>
+          ` : ""}
           <label class="field-span-full">
             <span class="label-row">Whole Movie Premise</span>
             <textarea data-context-field="premise" data-context-scope="${escapeHtml(scope)}">${escapeHtml(normalized.premise)}</textarea>
@@ -954,6 +1288,10 @@ function readContextEditor(scope, root = document) {
   };
 }
 
+function readContextLanguageTips(scope, root = document) {
+  return String(root.querySelector(`[data-context-language-tips][data-context-scope="${scope}"]`)?.value || "").trim();
+}
+
 function syncContextPreview(scope, root = document) {
   const preview = root.querySelector(`#context-preview-${scope}`);
   if (!preview) return;
@@ -977,6 +1315,7 @@ function addContextRow(scope, kind, root = document) {
   }
   if (scope === "main" && editingJobId) {
     contextEditorDrafts.set(scopeDraftKey("main", editingJobId), draft);
+    contextLanguageTipsDrafts.set(editingJobId, readContextLanguageTips("main", root));
     void fetch(`/api/jobs/${editingJobId}`)
       .then(response => response.json())
       .then(job => renderMainContextDialog(job, draft));
@@ -1007,7 +1346,10 @@ function renderContext(job) {
   renderedContextSnapshots.set(job.id, cloneSnapshot(ctx));
   const validation = job.validation_stats || {};
   const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
+  const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
+  const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
   const canResume = job.status === "paused" || job.status === "failed";
+  const callProgress = currentModelCallProgress(job);
   const resumeLabel = job.status === "failed" ? "Resume Failed Job" : "Resume";
   const resumeTitle = job.status === "failed"
     ? "Resume a failed translation from the last unfinished batch."
@@ -1021,6 +1363,17 @@ function renderContext(job) {
         </div>
         ${statusBadge(job.status)}
       </div>
+      ${callProgress ? `
+        <div class="progress model-call-progress-top" title="Current model call is running">
+          <div
+            class="progress-bar js-model-call-progress-bar"
+            data-target-percent="${callProgress.percent}"
+            data-started-at-ms="${callProgress.startedAtMs}"
+            data-expected-seconds="${callProgress.expectedSeconds}"
+            data-call-key="${escapeHtml(callProgress.callKey)}"
+          ></div>
+        </div>
+      ` : ""}
       <div class="actions">
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
@@ -1031,6 +1384,12 @@ function renderContext(job) {
         <button class="danger" data-action="stop" data-id="${job.id}" title="Stop the job after the current batch finishes." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop</button>
       </div>
       <div class="validation-summary">
+        ${metricStat(
+          "Translated",
+          `${translatedCount}/${sourceCount || 0}`,
+          "is-progress",
+          "Current translated line count out of total source subtitle lines.",
+        )}
         ${validationStat(
           job.id,
           "Suspect",
@@ -1079,16 +1438,31 @@ function renderJobs(jobs) {
     jobsEl.innerHTML = `<p class="job-meta">No jobs yet.</p>`;
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
+    stopModelCallAnimation();
+    modelCallRenderedState.clear();
     return;
   }
 
   const active = jobs.find(job => job.status === "processing" || job.status === "paused");
   if (active && active.session_context) {
+    const existingBar = activeJobCard.querySelector(".js-model-call-progress-bar");
+    if (existingBar && existingBar.parentElement) {
+      const barWidth = existingBar.getBoundingClientRect().width;
+      const trackWidth = existingBar.parentElement.getBoundingClientRect().width;
+      if (trackWidth > 0 && Number.isFinite(barWidth)) {
+        const renderedPercent = Math.max(0, Math.min(100, (barWidth / trackWidth) * 100));
+        const existingCallKey = String(existingBar.dataset.callKey || "");
+        modelCallRenderedState.set(active.id, { percent: renderedPercent, callKey: existingCallKey });
+      }
+    }
     activeJobCard.classList.remove("hidden");
     activeJobCard.innerHTML = renderContext(active);
+    animateCurrentModelCallBar(active);
   } else {
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
+    stopModelCallAnimation();
+    modelCallRenderedState.clear();
   }
 
   const counts = jobs.reduce((acc, job) => {
@@ -1139,6 +1513,8 @@ function renderJobs(jobs) {
       const resumeTitle = job.status === "failed"
         ? "Resume this failed translation from the last unfinished batch."
         : "Resume this paused translation.";
+      const canEditContext = job?.job_kind !== "review";
+      const editContextTitle = "Edit the context card and language tips used by resume/retranslation calls.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
       <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
@@ -1172,6 +1548,7 @@ function renderJobs(jobs) {
         </div>
         <div class="job-actions">
           <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
+          <button class="ghost" data-action="edit" data-id="${job.id}" title="${escapeHtml(editContextTitle)}" ${!canEditContext ? "disabled" : ""}>Edit Context</button>
           <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Inspect flagged subtitle lines and save manual fixes." ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}" title="Download the current translated subtitle file.">Download</button>` : ""}
           <button class="ghost" data-action="delete-job" data-id="${job.id}" title="Remove this job entry from the list. Active jobs must be paused or stopped first." ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete</button>
@@ -1369,7 +1746,11 @@ function renderMainContextDialog(job, context) {
   const currentDraft = contextEditorDrafts.has(draftKey)
     ? contextEditorDrafts.get(draftKey)
     : normalizeContextInput(context || {});
-  contextDialogBody.innerHTML = renderContextEditor("main", currentDraft);
+  const currentLanguageTips = contextLanguageTipsDrafts.has(job.id)
+    ? contextLanguageTipsDrafts.get(job.id)
+    : String(job?.settings?.target_language_tips || "");
+  contextDialogBody.innerHTML = renderContextEditor("main", currentDraft, { targetLanguageTips: currentLanguageTips });
+  renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_MAIN, contextDialogBody);
 }
 
 function reviewActionMeta(currentText, originalText) {
@@ -1542,6 +1923,9 @@ function renderReviewDialog(job, filter = "all") {
 async function fetchJobs() {
   const response = await fetch("/api/jobs");
   const jobs = await response.json();
+  for (const job of jobs) {
+    learnModelCallDurations(job);
+  }
   const models = [];
   for (const job of jobs) {
     if (job?.settings?.model) models.push(job.settings.model);
@@ -1642,6 +2026,7 @@ async function createJob(event) {
     alert("Could not create job.");
     return;
   }
+  rememberLanguageTip(payload.target_language_tips);
   rememberModel(document.getElementById("model")?.value);
   form.reset();
   loadSettings();
@@ -1685,6 +2070,7 @@ async function createReviewJob() {
     alert("Could not create validation review job.");
     return;
   }
+  rememberLanguageTip(payload.target_language_tips);
   rememberModel(document.getElementById("model")?.value);
   await fetchJobs();
 }
@@ -1934,16 +2320,19 @@ async function clearFinishedJobs() {
 async function saveEditedContext() {
   if (!editingJobId) return;
   const payload = normalizeContextInput(readContextEditor("main", contextDialogBody));
+  const targetLanguageTips = readContextLanguageTips("main", contextDialogBody);
   const response = await fetch(`/api/jobs/${editingJobId}/context`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_context: payload }),
+    body: JSON.stringify({ session_context: payload, target_language_tips: targetLanguageTips }),
   });
   if (!response.ok) {
     alert("Could not update context.");
     return;
   }
+  rememberLanguageTip(targetLanguageTips);
   contextEditorDrafts.delete(scopeDraftKey("main", editingJobId));
+  contextLanguageTipsDrafts.delete(editingJobId);
   dialog.close();
   editingJobId = null;
   await fetchJobs();
@@ -1970,6 +2359,37 @@ async function generateMainContext() {
 }
 
 document.addEventListener("click", (event) => {
+  const tipsToggle = event.target.closest("[data-tips-history-toggle]");
+  if (tipsToggle) {
+    toggleLanguageTipsMenu(tipsToggle.dataset.tipsHistoryToggle || "");
+    return;
+  }
+  const tipsApply = event.target.closest("[data-tips-history-apply]");
+  if (tipsApply) {
+    const target = tipsApply.dataset.tipsHistoryApply || "";
+    const value = tipsApply.dataset.tipValue || "";
+    setLanguageTipsInputValue(target, value);
+    closeLanguageTipsMenus();
+    return;
+  }
+  const tipsDelete = event.target.closest("[data-tips-history-delete]");
+  if (tipsDelete) {
+    const target = tipsDelete.dataset.tipsHistoryDelete || "";
+    const value = tipsDelete.dataset.tipValue || "";
+    forgetLanguageTip(value);
+    const root = rootForTipsTarget(target);
+    renderLanguageTipsHistoryMenu(target, root);
+    const menu = root.querySelector(`[data-tips-history-menu="${target}"]`);
+    const toggle = root.querySelector(`[data-tips-history-toggle="${target}"]`);
+    if (menu && toggle) {
+      menu.classList.add("open");
+      toggle.setAttribute("aria-expanded", "true");
+    }
+    return;
+  }
+  if (!event.target.closest(".tips-history")) {
+    closeLanguageTipsMenus();
+  }
   const historySummary = event.target.closest(".context-history-summary");
   if (historySummary) {
     const details = historySummary.closest("[data-context-history]");
@@ -2085,6 +2505,15 @@ document.addEventListener("input", (event) => {
     return;
   }
   const contextField = event.target.closest("[data-context-field], [data-context-character], [data-context-glossary]");
+  const languageTipsField = event.target.closest("[data-context-language-tips]");
+  if (languageTipsField) {
+    const root = languageTipsField.closest("dialog") || document;
+    const scope = root === snapshotDialog ? "snapshot" : "main";
+    if (scope === "main" && editingJobId) {
+      contextLanguageTipsDrafts.set(editingJobId, readContextLanguageTips("main", root));
+    }
+    return;
+  }
   if (contextField) {
     const root = contextField.closest("dialog") || document;
     const scope = root === snapshotDialog ? "snapshot" : "main";
@@ -2160,8 +2589,10 @@ snapshotDialog?.addEventListener("close", () => {
   openSnapshotBatchIndex = null;
 });
 dialog?.addEventListener("close", () => {
+  closeLanguageTipsMenus();
   if (editingJobId) {
     contextEditorDrafts.delete(scopeDraftKey("main", editingJobId));
+    contextLanguageTipsDrafts.delete(editingJobId);
   }
   editingJobId = null;
 });
@@ -2183,6 +2614,7 @@ bindDropZone(dropZone, fileInput);
 bindDropZone(translatedDropZone, translatedFileInput);
 bindReferenceTrackCard(referenceTracksCard);
 setConsoleTab("runtime");
+renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
 
 async function initializeApp() {
   await fetchRuntimeDefaults();
@@ -2190,6 +2622,7 @@ async function initializeApp() {
   applyRuntimeDefaults();
   renderModelHistory();
   renderModelSelect();
+  renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
   updateSelectedFileLabel();
   updateSelectedTranslatedFileLabel();
   renderReferenceTrackEmptyState();

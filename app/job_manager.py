@@ -708,12 +708,26 @@ class JobManager:
         self._save_state()
         return True
 
-    def update_context(self, job_id: str, context: SessionContext) -> bool:
+    def update_context(self, job_id: str, context: SessionContext, target_language_tips: str | None = None) -> bool:
         job = self.jobs.get(job_id)
-        if not job or job.status not in {JobStatus.PROCESSING, JobStatus.PAUSED}:
+        if not job or job.job_kind == "review":
+            return False
+        if job.status not in {
+            JobStatus.QUEUED,
+            JobStatus.PROCESSING,
+            JobStatus.PAUSED,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
             return False
         self._record_context(job, context)
-        job.message = "Context updated; next batch will use the edited card"
+        if target_language_tips is not None:
+            job.settings.target_language_tips = str(target_language_tips or "").strip()
+        if job.status in {JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.PAUSED}:
+            job.message = "Context updated; next batch will use the edited card"
+        else:
+            job.message = "Context updated; future line retranslations will use the edited card"
         self._append_log(job, "info", "Context updated from UI", save=False)
         self._save_state()
         return True

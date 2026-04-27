@@ -193,3 +193,4 @@ class RuntimeDefaultsResponse(BaseModel):
 
 class UpdateContextRequest(BaseModel):
     session_context: dict[str, Any]
+    target_language_tips: str | None = None

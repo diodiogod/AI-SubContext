@@ -413,6 +413,73 @@ label {
 .model-list-label {
   margin-top: 0.1rem;
 }
+.tips-history {
+  position: relative;
+  display: grid;
+  gap: 0.45rem;
+}
+.tips-history-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+.tips-history-toggle {
+  white-space: nowrap;
+  border-radius: 14px;
+}
+.tips-history-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  right: 0;
+  z-index: 25;
+  padding: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(17, 28, 36, 0.98);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  max-height: 12rem;
+  overflow: auto;
+}
+.tips-history-menu.open {
+  display: grid;
+  gap: 0.3rem;
+}
+.tips-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  align-items: center;
+}
+.tips-history-apply,
+.tips-history-delete {
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  box-shadow: none;
+}
+.tips-history-apply {
+  text-align: left;
+  font-weight: 500;
+  padding: 0.45rem 0.55rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tips-history-delete {
+  width: 2rem;
+  min-width: 2rem;
+  padding: 0.45rem 0;
+  line-height: 1;
+}
+.tips-history-empty {
+  color: var(--muted);
+  font-size: 0.83rem;
+  padding: 0.45rem 0.55rem;
+}
 input, textarea, select, button {
   font: inherit;
 }
@@ -788,6 +855,13 @@ button.danger {
   transform: translateX(-100%);
   animation: progress-sheen 2.8s linear infinite;
 }
+.model-call-progress-top {
+  margin-top: 0.35rem;
+}
+.model-call-progress-top .progress-bar {
+  background: linear-gradient(90deg, #6cb8ff, #8ef2d2);
+  will-change: width;
+}
 .context-card {
   display: grid;
   gap: 1rem;
@@ -808,7 +882,7 @@ button.danger {
 }
 .validation-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.7rem;
 }
 .validation-stat {
@@ -839,6 +913,9 @@ button.danger {
 }
 .validation-stat.is-error strong {
   color: var(--danger);
+}
+.validation-stat.is-progress strong {
+  color: #88d5ff;
 }
 .scene {
   background: linear-gradient(180deg, rgba(120, 230, 222, 0.12), rgba(120, 230, 222, 0.06));

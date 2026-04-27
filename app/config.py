@@ -13,6 +13,7 @@ class TranslationSettings(BaseModel):
     model: str = Field(...)
     source_language: str = Field(...)
     target_language: str = Field(...)
+    target_language_tips: str = Field(default="", max_length=2000)
     title: str = Field(default="")
     batch_size: int = Field(default=10, ge=1, le=100)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
