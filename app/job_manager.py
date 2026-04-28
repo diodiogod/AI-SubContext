@@ -125,8 +125,55 @@ class JobManager:
             return
         existing = {issue.position: issue for issue in job.validation_issues}
         for issue in issues:
+            previous = existing.get(issue.position)
+            issue.notes = self._notes_with_previous_context(
+                previous,
+                issue.status,
+                list(issue.notes or []),
+            )
             existing[issue.position] = issue
         job.validation_issues = [existing[position] for position in sorted(existing)]
+
+    def _notes_with_previous_context(
+        self,
+        previous_issue: SubtitleValidationIssue | None,
+        status: str,
+        notes: list[str],
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        def add_note(value: str) -> None:
+            note = str(value or "").strip()
+            if not note or note in seen:
+                return
+            seen.add(note)
+            merged.append(note)
+
+        for note in notes:
+            add_note(note)
+
+        # When a retry fixes a previously flagged subtitle, keep the prior findings
+        # so users can understand what was wrong before the fix.
+        if (
+            previous_issue
+            and status == "auto_fixed"
+            and previous_issue.status in {"suspect", "error"}
+        ):
+            previous_codes = [
+                str(code or "").strip()
+                for code in (previous_issue.reason_codes or [])
+                if str(code or "").strip()
+            ]
+            if previous_codes:
+                add_note(f"Previous reason codes: {', '.join(previous_codes)}")
+            for note in previous_issue.notes or []:
+                cleaned = str(note or "").strip()
+                if not cleaned:
+                    continue
+                add_note(f"Previous issue: {cleaned}")
+
+        return merged
 
     def _line_by_position(self, lines: list[SubtitleLine], position: int) -> SubtitleLine | None:
         for line in lines:
@@ -271,7 +318,7 @@ class JobManager:
         issue.status = status
         issue.translated_text = translated_text
         issue.reason_codes = list(reason_codes or [])
-        issue.notes = notes
+        issue.notes = self._notes_with_previous_context(issue, status, notes)
         issue.batch_index = batch_index
 
         if status == "suspect":

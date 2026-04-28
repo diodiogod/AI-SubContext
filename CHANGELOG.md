@@ -5,6 +5,20 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-04-27
+
+### Added
+
+- Retry-fixed subtitles now show the previous validation findings for context
+- Review panels no longer collapse fixed lines to only a generic cleared after retry note
+
+### Changed
+
+- Users can better understand what was wrong before automatic recovery
+
+### Fixed
+
+- Improve retry-fixed issue transparency
 ## [0.2.4] - 2026-04-27
 
 ### Added
