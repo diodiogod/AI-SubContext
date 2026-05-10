@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260421-6" />
+    <link rel="stylesheet" href="/static/app.css?v=20260510-5" />
   </head>
   <body>
     <main class="shell review-shell">
@@ -49,7 +49,7 @@
               <input type="number" id="max_completion_tokens" min="128" max="16000" step="64" />
             </label>
             <label>
-              <span class="label-row">Request Timeout (s) <span class="info-dot" title="How long one model request may run before the backend gives up. If a multi-line batch times out, the backend now auto-splits it and retries smaller chunks.">?</span></span>
+              <span class="label-row">Request Timeout (s) <span class="info-dot" title="How long one model request may run before the app stops waiting. Local model servers may keep generating after the app times out, so cancel the old generation if retries stall. Increase this for slower local models.">?</span></span>
               <input type="number" id="request_timeout_seconds" min="15" max="900" step="5" />
             </label>
           </div>
@@ -93,6 +93,6 @@
       </section>
     </main>
 
-    <script src="/static/prompt_lab.js?v=20260421-1"></script>
+    <script src="/static/prompt_lab.js?v=20260510-2"></script>
   </body>
 </html>

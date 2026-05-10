@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
@@ -28,6 +29,7 @@ except Exception:  # pragma: no cover - dependency is optional at import time
     LangDetector = None
 
 _WORD_RE = re.compile(r"[A-Za-zÀ-ÿ']+")
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 _LANGUAGE_DETECTOR: Any = None
 _LANGUAGE_DETECTOR_FAILED = False
 
@@ -142,6 +144,53 @@ class ModelRequestTimeout(RuntimeError):
         super().__init__(f"Model request timed out after {self.seconds}s")
 
 
+class TranslationStopRequested(RuntimeError):
+    pass
+
+
+def _timeout_guidance(seconds: int) -> str:
+    return (
+        f"Model request timed out after {seconds}s. "
+        "The model server may still be generating the abandoned request in the background; "
+        "if retries stall, cancel/stop that generation in the model server. "
+        "You can raise Request Timeout in Prompt Lab > Safety Controls for slower local models."
+    )
+
+
+def _approx_token_count(value: str) -> int:
+    text = str(value or "")
+    if not text:
+        return 0
+    cjk_count = len(_CJK_RE.findall(text))
+    non_cjk_count = max(0, len(text) - cjk_count)
+    # This is intentionally conservative for local-model capacity planning.
+    # Exact counts require the specific model tokenizer, which LM Studio may vary.
+    return cjk_count + math.ceil(non_cjk_count / 4)
+
+
+def _json_for_prompt_size(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _prompt_size_summary(messages: list[dict[str, str]], sections: dict[str, str]) -> str:
+    message_text = "\n".join(str(message.get("content") or "") for message in messages)
+    message_chars = len(message_text)
+    message_tokens = _approx_token_count(message_text)
+    section_parts = []
+    for label, value in sections.items():
+        text = str(value or "")
+        section_parts.append(f"{label} {len(text)} chars/~{_approx_token_count(text)} tok")
+    return (
+        f"Prompt size estimate: {message_chars} message chars/~{message_tokens} prompt tokens"
+        + (f" ({'; '.join(section_parts)})" if section_parts else "")
+    )
+
+
+def _raise_if_stop_requested(should_stop: StopCheck | None) -> None:
+    if should_stop and should_stop():
+        raise TranslationStopRequested("Translation stopped by user")
+
+
 @dataclass
 class BatchValidationResult:
     failed: bool
@@ -170,6 +219,7 @@ class BatchProcessingStats:
 
 
 LogEvent = Callable[[str, str], None]
+StopCheck = Callable[[], bool]
 
 _META_STYLE_NOTE_PATTERNS = (
     "prefer unknown",
@@ -1325,6 +1375,7 @@ class OpenAICompatibleTranslator:
         session_context: SessionContext | None,
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         extra_instruction: str = "",
+        log_event: LogEvent | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None]:
         system_instruction = _with_target_language_tips(
             _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT),
@@ -1335,6 +1386,7 @@ class OpenAICompatibleTranslator:
 
         context_payload = session_context.model_dump() if session_context else {}
         line_payload = []
+        reference_count = 0
         for line in batch_lines:
             item = {
                 "position": line.position,
@@ -1342,8 +1394,16 @@ class OpenAICompatibleTranslator:
             }
             references = (reference_subtitles_by_position or {}).get(line.position) or []
             if references:
+                reference_count += len(references)
                 item["reference_subtitles"] = references
             line_payload.append(item)
+        user_payload = {
+            "title": settings.title,
+            "source_language": settings.source_language,
+            "target_language": settings.target_language,
+            "session_context": context_payload,
+            "lines": line_payload,
+        }
         messages = [
             {
                 "role": "system",
@@ -1351,18 +1411,28 @@ class OpenAICompatibleTranslator:
             },
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "title": settings.title,
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
-                        "session_context": context_payload,
-                        "lines": line_payload,
-                    },
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(user_payload, ensure_ascii=False),
             },
         ]
+        if log_event:
+            references_payload = [
+                reference
+                for item in line_payload
+                for reference in item.get("reference_subtitles", [])
+            ]
+            log_event(
+                "info",
+                _prompt_size_summary(
+                    messages,
+                    {
+                        "system": system_instruction,
+                        "context": _json_for_prompt_size(context_payload),
+                        "lines": _json_for_prompt_size(line_payload),
+                        "refs": _json_for_prompt_size(references_payload) if reference_count else "",
+                    },
+                )
+                + f"; {len(batch_lines)} source line(s), {reference_count} reference match(es)",
+            )
         data = await self._chat_json(settings, messages, "translation_batch", _translation_schema())
         translations = [
             SubtitleLine(position=int(item["position"]), text=str(item["text"]))
@@ -1478,7 +1548,9 @@ class OpenAICompatibleTranslator:
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
+        should_stop: StopCheck | None = None,
     ) -> tuple[list[SubtitleLine], BatchProcessingStats]:
+        _raise_if_stop_requested(should_stop)
         if not suspicious_positions:
             return translated_lines, BatchProcessingStats()
 
@@ -1490,6 +1562,7 @@ class OpenAICompatibleTranslator:
         )
 
         for position in suspicious_positions:
+            _raise_if_stop_requested(should_stop)
             source_line = source_by_position.get(position)
             if source_line is None:
                 continue
@@ -1505,7 +1578,9 @@ class OpenAICompatibleTranslator:
                     _effective_prompt(settings, "prompt_translation_strict_retry", DEFAULT_STRICT_RETRY_PROMPT)
                     + " Focus only on this subtitle line and translate it fully into the target language."
                 ),
+                log_event=log_event,
             )
+            _raise_if_stop_requested(should_stop)
             retried_line = retried_lines[0]
             retried_validation = _validate_translated_batch(settings, [source_line], [retried_line])
             flagged_positions = _flagged_positions(retried_validation, [source_line], settings)
@@ -1560,7 +1635,9 @@ class OpenAICompatibleTranslator:
         log_event: LogEvent | None = None,
         depth: int = 0,
         reason: str = "Splitting batch",
+        should_stop: StopCheck | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
+        _raise_if_stop_requested(should_stop)
         midpoint = max(1, len(batch_lines) // 2)
         first_half, second_half = batch_lines[:midpoint], batch_lines[midpoint:]
         if log_event:
@@ -1576,7 +1653,9 @@ class OpenAICompatibleTranslator:
             batch_index=batch_index,
             log_event=log_event,
             depth=depth + 1,
+            should_stop=should_stop,
         )
+        _raise_if_stop_requested(should_stop)
         translated_second, context_after_second, second_stats = await self._translate_batch_with_validation(
             settings,
             second_half,
@@ -1585,6 +1664,7 @@ class OpenAICompatibleTranslator:
             batch_index=batch_index,
             log_event=log_event,
             depth=depth + 1,
+            should_stop=should_stop,
         )
         merged_stats = BatchProcessingStats(retried_batches=1, split_batches=1)
         merged_stats.merge(first_stats).merge(second_stats)
@@ -1599,7 +1679,9 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         depth: int = 0,
+        should_stop: StopCheck | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
+        _raise_if_stop_requested(should_stop)
         last_translated: list[SubtitleLine] | None = None
         last_context: SessionContext | None = session_context
         last_validation = BatchValidationResult(False, [], None, "")
@@ -1611,6 +1693,7 @@ class OpenAICompatibleTranslator:
         )
 
         for attempt_index, extra_instruction in enumerate(("", strict_retry_instruction), start=1):
+            _raise_if_stop_requested(should_stop)
             if log_event:
                 if attempt_index == 1:
                     log_event("info", f"Submitting batch to model with {len(batch_lines)} lines")
@@ -1623,8 +1706,10 @@ class OpenAICompatibleTranslator:
                     session_context,
                     reference_subtitles_by_position=reference_subtitles_by_position,
                     extra_instruction=extra_instruction,
+                    log_event=log_event,
                 )
             except ModelRequestTimeout as exc:
+                _raise_if_stop_requested(should_stop)
                 if len(batch_lines) > 1 and depth < 4:
                     return await self._split_batch_and_translate(
                         settings,
@@ -1634,11 +1719,13 @@ class OpenAICompatibleTranslator:
                         batch_index=batch_index,
                         log_event=log_event,
                         depth=depth,
-                        reason=f"Model request timed out after {exc.seconds}s",
+                        reason=_timeout_guidance(exc.seconds),
+                        should_stop=should_stop,
                     )
                 if log_event:
-                    log_event("error", f"Model request timed out after {exc.seconds}s")
+                    log_event("error", _timeout_guidance(exc.seconds))
                 raise
+            _raise_if_stop_requested(should_stop)
             validation = _validate_translated_batch(settings, batch_lines, translated_lines)
             flagged_positions = _flagged_positions(validation, batch_lines, settings)
             if log_event:
@@ -1680,6 +1767,7 @@ class OpenAICompatibleTranslator:
                             reference_subtitles_by_position=reference_subtitles_by_position,
                             batch_index=batch_index,
                             log_event=log_event,
+                            should_stop=should_stop,
                         )
                         remaining_flagged = [position for position in flagged_positions if position not in strong_repair_positions]
                         if remaining_flagged:
@@ -1737,6 +1825,7 @@ class OpenAICompatibleTranslator:
                 first_failed_positions = flagged_positions
 
         if len(batch_lines) > 1 and depth < 4:
+            _raise_if_stop_requested(should_stop)
             return await self._split_batch_and_translate(
                 settings,
                 batch_lines,
@@ -1746,6 +1835,7 @@ class OpenAICompatibleTranslator:
                 log_event=log_event,
                 depth=depth,
                 reason="Validation still failing",
+                should_stop=should_stop,
             )
 
         if last_translated is not None:
@@ -1781,6 +1871,7 @@ class OpenAICompatibleTranslator:
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
+        should_stop: StopCheck | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
         return await self._translate_batch_with_validation(
             settings,
@@ -1789,4 +1880,5 @@ class OpenAICompatibleTranslator:
             reference_subtitles_by_position=reference_subtitles_by_position,
             batch_index=batch_index,
             log_event=log_event,
+            should_stop=should_stop,
         )

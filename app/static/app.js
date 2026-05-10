@@ -74,6 +74,7 @@ const renderedContextSnapshots = new Map();
 const modelCallParserState = new Map();
 const modelCallRenderedState = new Map();
 const modelCallAnimation = { jobId: null, rafId: null };
+const logDialogTabs = new Map();
 
 function readModelCallStats() {
   const raw = localStorage.getItem(MODEL_CALL_STATS_KEY);
@@ -597,6 +598,17 @@ function collectSettingsPayload() {
   return payload;
 }
 
+function collectRuntimeOverridePayload() {
+  const merged = { ...runtimeDefaults, ...readStoredSettings() };
+  const payload = {};
+  for (const fieldId of RUNTIME_DEFAULT_FIELD_IDS) {
+    if (fieldId in merged) {
+      payload[fieldId] = merged[fieldId];
+    }
+  }
+  return payload;
+}
+
 function updateSelectedFileLabel() {
   const file = fileInput.files && fileInput.files[0];
   selectedFile.textContent = file ? file.name : "No file selected";
@@ -742,6 +754,100 @@ function formatProgress(value) {
   return `${Math.round(bounded)}%`;
 }
 
+function formatDuration(seconds) {
+  const numeric = Math.max(0, Math.round(Number(seconds) || 0));
+  if (!numeric) return "";
+  const hours = Math.floor(numeric / 3600);
+  const minutes = Math.floor((numeric % 3600) / 60);
+  const secs = numeric % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+  return `${secs}s`;
+}
+
+function jobEtaSeconds(job) {
+  if (!job || job.status !== "processing") return null;
+  const completionAtMs = job.estimated_completion_at ? Date.parse(String(job.estimated_completion_at)) : NaN;
+  if (Number.isFinite(completionAtMs)) {
+    return Math.max(0, Math.round((completionAtMs - Date.now()) / 1000));
+  }
+  const eta = Number(job.eta_seconds);
+  return Number.isFinite(eta) && eta > 0 ? eta : null;
+}
+
+function formatJobEta(job) {
+  const eta = jobEtaSeconds(job);
+  if (eta === null) return "Calculating after first batch";
+  if (eta <= 0) return "Finishing";
+  return formatDuration(eta);
+}
+
+function currentRequestTimeoutInfo(job) {
+  const configuredTimeout = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
+  const callProgress = currentModelCallProgress(job);
+  if (!callProgress || job?.status !== "processing") {
+    return {
+      configuredTimeout,
+      label: `${configuredTimeout}s`,
+      detail: "Configured per-request timeout for this job.",
+    };
+  }
+  const startedAtMs = Number(callProgress.startedAtMs || Date.now());
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const remainingSeconds = Math.max(0, configuredTimeout - elapsedSeconds);
+  return {
+    configuredTimeout,
+    startedAtMs,
+    elapsedSeconds,
+    remainingSeconds,
+    label: `${formatDuration(elapsedSeconds) || "0s"} / ${configuredTimeout}s`,
+    detail: `${formatDuration(remainingSeconds) || "0s"} until this active request reaches the configured timeout.`,
+  };
+}
+
+function timeoutInfoAttrs(timeoutInfo) {
+  if (!timeoutInfo?.startedAtMs) return "";
+  return ` data-live-timeout="true" data-timeout-started-ms="${escapeHtml(String(timeoutInfo.startedAtMs))}" data-timeout-seconds="${escapeHtml(String(timeoutInfo.configuredTimeout))}"`;
+}
+
+function updateLiveTimeoutDisplays() {
+  const nodes = document.querySelectorAll("[data-live-timeout='true']");
+  for (const node of nodes) {
+    const startedAtMs = Number(node.dataset.timeoutStartedMs || 0);
+    const configuredTimeout = Math.max(15, Number(node.dataset.timeoutSeconds || 120));
+    if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) continue;
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+    const remainingSeconds = Math.max(0, configuredTimeout - elapsedSeconds);
+    node.textContent = `${formatDuration(elapsedSeconds) || "0s"} / ${configuredTimeout}s`;
+    node.title = `${formatDuration(remainingSeconds) || "0s"} until this active request reaches the configured timeout.`;
+  }
+}
+
+function renderEtaPill(job) {
+  if (!job || job.status !== "processing") return "";
+  return `
+    <div class="eta-pill" title="Adaptive ETA based on completed batch timing. It recalibrates after each finished batch.">
+      <span>ETA</span>
+      <strong>${escapeHtml(formatJobEta(job))}</strong>
+    </div>
+  `;
+}
+
+function latestTimeoutWarning(job) {
+  if (!job || job.status === "completed" || job.status === "cancelled") return "";
+  const logs = Array.isArray(job?.logs) ? job.logs : [];
+  const timeoutLog = [...logs].reverse().find(entry => String(entry?.message || "").includes("Model request timed out after"));
+  if (!timeoutLog) return "";
+  const timeoutBatch = hasBatchIndex(timeoutLog.batch_index) ? Number(timeoutLog.batch_index) : null;
+  const completedBatch = Number(job.current_batch || 0);
+  if (timeoutBatch !== null && Number.isFinite(timeoutBatch) && completedBatch >= timeoutBatch) {
+    return "";
+  }
+  const batch = hasBatchIndex(timeoutLog.batch_index) ? `Batch ${Number(timeoutLog.batch_index)}` : "A model request";
+  const configuredTimeout = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
+  return `${batch} hit the ${configuredTimeout}s request timeout. The model server may still be generating that abandoned request; if retries stall, cancel it in the model server. You can raise Request Timeout in Prompt Lab > Safety Controls.`;
+}
+
 function currentModelCallProgress(job) {
   if (!job || job.status !== "processing") return null;
   const totalBatches = Math.max(0, Number(job.total_batches || 0));
@@ -858,7 +964,16 @@ function formatConfidence(value) {
   return `${Math.round(Math.max(0, Math.min(1, numeric)) * 100)}%`;
 }
 
-function renderReferenceTrackSummary(track, compact = false) {
+function referenceTrackQuality(track, primaryTotal = 0) {
+  const matched = Math.max(0, Number(track?.matched_lines || 0));
+  const average = Math.max(0, Math.min(1, Number(track?.average_confidence || 0)));
+  const coverage = primaryTotal > 0 ? matched / primaryTotal : 0;
+  if (primaryTotal > 0 && (coverage < 0.55 || average < 0.5)) return "weak";
+  if (primaryTotal > 0 && (coverage < 0.8 || average < 0.68)) return "mixed";
+  return "strong";
+}
+
+function renderReferenceTrackSummary(track, compact = false, primaryTotal = 0) {
   if (!track) return "";
   const language = String(track.language || "").trim() || "ref";
   const filename = String(track.filename || "reference.srt").trim() || "reference.srt";
@@ -866,17 +981,37 @@ function renderReferenceTrackSummary(track, compact = false) {
   const total = Number(track.total_lines || 0);
   const average = formatConfidence(track.average_confidence);
   const mode = String(track.alignment_mode || "timestamp");
+  const primaryCount = Math.max(0, Number(primaryTotal || 0));
+  const unmatchedPrimary = primaryCount > 0 ? Math.max(0, primaryCount - matched) : 0;
+  const coverage = primaryCount > 0 ? `${Math.round((matched / primaryCount) * 100)}%` : "n/a";
+  const lineDelta = primaryCount > 0 ? total - primaryCount : 0;
+  const quality = referenceTrackQuality(track, primaryCount);
+  const qualityLabel = quality === "strong" ? "Strong" : (quality === "mixed" ? "Check" : "Weak");
+  const summaryTitle = [
+    `${matched}/${primaryCount || "?"} primary source lines received aligned reference text.`,
+    `${total} reference subtitle lines loaded.`,
+    lineDelta ? `Reference has ${Math.abs(lineDelta)} ${lineDelta > 0 ? "more" : "fewer"} line(s) than the primary source.` : "Reference line count is close to the primary source.",
+    `Alignment mode: ${mode}. Average confidence: ${average}.`,
+  ].join(" ");
   return `
-    <div class="reference-track-summary ${compact ? "compact" : ""}">
+    <div class="reference-track-summary ${compact ? "compact" : ""} ${quality}" title="${escapeHtml(summaryTitle)}">
       <div class="reference-track-summary-head">
         <span class="job-fact">${escapeHtml(language)}</span>
         <span class="job-meta">${escapeHtml(filename)}</span>
       </div>
       <div class="reference-track-summary-meta">
-        <span class="job-fact">Match ${escapeHtml(String(matched))}/${escapeHtml(String(total))}</span>
+        <span class="job-fact">Primary ${escapeHtml(String(matched))}/${escapeHtml(String(primaryCount || "?"))}</span>
+        <span class="job-fact">Coverage ${escapeHtml(coverage)}</span>
+        <span class="job-fact">Ref lines ${escapeHtml(String(total))}${lineDelta ? escapeHtml(` (${lineDelta > 0 ? "+" : ""}${lineDelta})`) : ""}</span>
         <span class="job-fact">Avg ${escapeHtml(average)}</span>
         <span class="job-fact">${escapeHtml(mode)}</span>
+        <span class="job-fact">Quality ${escapeHtml(qualityLabel)}</span>
       </div>
+      ${!compact && primaryCount > 0 && unmatchedPrimary ? `
+        <div class="reference-track-note">
+          ${escapeHtml(String(unmatchedPrimary))} primary line(s) have no confident reference match. Extra reference lines are skipped or grouped by timestamp.
+        </div>
+      ` : ""}
     </div>
   `;
 }
@@ -1348,14 +1483,19 @@ function renderContext(job) {
   const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
   const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
   const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
+  const etaLabel = job.status === "processing" ? formatJobEta(job) : "Paused";
+  const timeoutWarning = latestTimeoutWarning(job);
   const canResume = job.status === "paused" || job.status === "failed";
   const callProgress = currentModelCallProgress(job);
   const resumeLabel = job.status === "failed" ? "Resume Failed Job" : "Resume";
   const resumeTitle = job.status === "failed"
-    ? "Resume a failed translation from the last unfinished batch."
-    : "Resume a paused job from the next pending batch.";
+    ? "Resume a failed translation from the last unfinished batch using current Prompt Lab runtime settings."
+    : "Resume a paused job from the next pending batch using current Prompt Lab runtime settings.";
   return `
     <div class="context-card">
+      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">
+        <span class="job-corner-label" aria-hidden="true">log</span>
+      </button>
       <div class="panel-head">
         <div>
           <h2>Translation Context</h2>
@@ -1381,14 +1521,15 @@ function renderContext(job) {
         <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Open the line review panel. Use it to inspect flagged lines and apply manual fixes.">Review Lines</button>
         <button class="ghost" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">View Log</button>
         <button class="ghost" data-action="edit" data-id="${job.id}" title="Edit the rolling context card before the next batch uses it." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Edit Context</button>
-        <button class="danger" data-action="stop" data-id="${job.id}" title="Stop the job after the current batch finishes." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop</button>
+        <button class="danger" data-action="stop" data-id="${job.id}" title="Cancel the active app request and stop the job. If LM Studio keeps generating after client disconnect, cancel it in LM Studio too." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop</button>
       </div>
+      ${timeoutWarning ? `<div class="runtime-warning">${escapeHtml(timeoutWarning)}</div>` : ""}
       <div class="validation-summary">
         ${metricStat(
           "Translated",
-          `${translatedCount}/${sourceCount || 0}`,
+          `${translatedCount}/${sourceCount || 0}${job.status === "processing" ? ` · ETA ${etaLabel}` : ""}`,
           "is-progress",
-          "Current translated line count out of total source subtitle lines.",
+          "Current translated line count out of total source subtitle lines. ETA is adaptive and recalculated after each completed batch.",
         )}
         ${validationStat(
           job.id,
@@ -1498,9 +1639,12 @@ function renderJobs(jobs) {
       const targetLanguage = escapeHtml(job?.settings?.target_language || "n/a");
       const model = escapeHtml(job?.settings?.model || "No model");
       const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
+      const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
+      const requestTimeout = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
       const referenceLanguages = referenceTracks.map(track => String(track?.language || "").trim()).filter(Boolean);
       const kind = job?.job_kind === "review" ? "Validation Review" : "Translation";
       const message = escapeHtml(job.message || "Waiting for update.");
+      const timeoutWarning = latestTimeoutWarning(job);
       const logCount = Array.isArray(job.logs) ? job.logs.length : 0;
       const logTitle = logCount
         ? `Show verbose runtime events, retries, and validation decisions. ${logCount} log entries available.`
@@ -1511,8 +1655,8 @@ function renderJobs(jobs) {
       const canResume = job.status === "paused" || job.status === "failed";
       const resumeLabel = job.status === "failed" ? "Resume Failed" : "Resume";
       const resumeTitle = job.status === "failed"
-        ? "Resume this failed translation from the last unfinished batch."
-        : "Resume this paused translation.";
+        ? "Resume this failed translation from the last unfinished batch using current Prompt Lab runtime settings."
+        : "Resume this paused translation using current Prompt Lab runtime settings.";
       const canEditContext = job?.job_kind !== "review";
       const editContextTitle = "Edit the context card and language tips used by resume/retranslation calls.";
       return `
@@ -1533,6 +1677,7 @@ function renderJobs(jobs) {
             <span class="job-fact">${model}</span>
             ${referenceLanguages.length ? `<span class="job-fact">Refs ${escapeHtml(referenceLanguages.join(", "))}</span>` : ""}
             <span class="job-fact">Progress ${progress}</span>
+            <span class="job-fact">Timeout ${escapeHtml(String(requestTimeout))}s</span>
             ${(validation.suspicious_subtitles || fixedTotal || validation.error_subtitles) ? `
               <span class="job-fact">Suspect ${escapeHtml(String(validation.suspicious_subtitles || 0))}</span>
               <span class="job-fact">Fixed ${escapeHtml(String(fixedTotal))}</span>
@@ -1540,9 +1685,10 @@ function renderJobs(jobs) {
             ` : ""}
           </div>
           <div class="job-meta">${message}</div>
+          ${timeoutWarning ? `<div class="runtime-warning compact">${escapeHtml(timeoutWarning)}</div>` : ""}
           ${referenceTracks.length ? `
             <div class="reference-track-summary-list">
-              ${referenceTracks.map(track => renderReferenceTrackSummary(track, true)).join("")}
+              ${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}
             </div>
           ` : ""}
         </div>
@@ -1558,6 +1704,7 @@ function renderJobs(jobs) {
         <div class="job-progress-label">Translation progress</div>
         <div class="job-progress-value">${progress}</div>
       </div>
+      ${renderEtaPill(job)}
       <div class="progress"><div class="progress-bar" style="width:${job.progress || 0}%"></div></div>
     </article>
   `;
@@ -1571,45 +1718,89 @@ function renderLogDialog(job) {
   const logs = Array.isArray(job.logs) ? job.logs : [];
   const issues = Array.isArray(job.validation_issues) ? job.validation_issues : [];
   const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
-  const previousScrollTop = logDialogBody.scrollTop;
-  const previousScrollHeight = logDialogBody.scrollHeight;
-  const previousClientHeight = logDialogBody.clientHeight;
-  const wasNearBottom = previousScrollHeight - (previousScrollTop + previousClientHeight) < 48;
+  const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
+  const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
+  const latestLogs = [...logs].reverse();
+  const latestEvent = latestLogs[0] || null;
+  const latestBatch = latestEvent && hasBatchIndex(latestEvent.batch_index) ? `Batch ${Number(latestEvent.batch_index)}` : "System";
+  const latestLevel = escapeHtml(latestEvent?.level || "info");
+  const timeoutInfo = currentRequestTimeoutInfo(job);
+  const activeTab = logDialogTabs.get(job.id) || "events";
+  const issueCount = issues.length;
   logDialogTitle.textContent = `${title} Log`;
   if (!logs.length && !issues.length && !referenceTracks.length) {
     logDialogBody.innerHTML = `<p class="job-meta">No verbose events yet.</p>`;
     return;
   }
   logDialogBody.innerHTML = `
-    <div class="log-section">
-      <div class="mini-eyebrow">Event Log</div>
-      <div class="log-list">
-      ${logs.map(entry => {
-        const level = escapeHtml(entry.level || "info");
-        const batch = hasBatchIndex(entry.batch_index) ? `Batch ${Number(entry.batch_index)}` : "System";
-        return `
-          <article class="log-entry">
-            <div class="log-entry-head">
-              <span class="log-time">${escapeHtml(formatTimestamp(entry.timestamp))}</span>
-              <span class="log-badge ${level}">${level}</span>
-              <span class="log-batch">${escapeHtml(batch)}</span>
-            </div>
-            <div class="log-message">${escapeHtml(entry.message || "")}</div>
-          </article>
-        `;
-      }).join("")}
+    <div class="log-tabs" role="tablist" aria-label="Log sections">
+      <button type="button" class="log-tab ${activeTab === "events" ? "active" : ""}" data-log-tab="events">Events ${escapeHtml(String(logs.length))}</button>
+      <button type="button" class="log-tab ${activeTab === "references" ? "active" : ""}" data-log-tab="references" ${referenceTracks.length ? "" : "disabled"}>References ${escapeHtml(String(referenceTracks.length))}</button>
+      <button type="button" class="log-tab ${activeTab === "issues" ? "active" : ""}" data-log-tab="issues" ${issueCount ? "" : "disabled"}>Issues ${escapeHtml(String(issueCount))}</button>
+    </div>
+    <div class="log-overview">
+      <div class="log-overview-item">
+        <span>Status</span>
+        <strong>${escapeHtml(job.status || "unknown")}</strong>
+      </div>
+      <div class="log-overview-item">
+        <span>Progress</span>
+        <strong>${escapeHtml(String(translatedCount))}/${escapeHtml(String(sourceCount || 0))}</strong>
+      </div>
+      <div class="log-overview-item">
+        <span>Batch</span>
+        <strong>${escapeHtml(String(job.current_batch || 0))}/${escapeHtml(String(job.total_batches || 0))}</strong>
+      </div>
+      <div class="log-overview-item">
+        <span>Timeout</span>
+        <strong title="${escapeHtml(timeoutInfo.detail)}"${timeoutInfoAttrs(timeoutInfo)}>${escapeHtml(timeoutInfo.label)}</strong>
       </div>
     </div>
-    ${referenceTracks.length ? `
+    <section class="log-tab-panel ${activeTab === "events" ? "active" : ""}" data-log-panel="events">
+      ${latestEvent ? `
+        <article class="log-entry latest ${latestLevel}">
+          <div class="log-entry-head">
+            <span class="log-badge ${latestLevel}">latest</span>
+            <span class="log-time">${escapeHtml(formatTimestamp(latestEvent.timestamp))}</span>
+            <span class="log-batch">${escapeHtml(latestBatch)}</span>
+          </div>
+          <div class="log-message">${escapeHtml(latestEvent.message || "")}</div>
+        </article>
+      ` : ""}
       <div class="log-section">
-        <div class="mini-eyebrow">Reference Track Alignment</div>
-        <div class="reference-track-summary-list">
-          ${referenceTracks.map(track => renderReferenceTrackSummary(track)).join("")}
+        <div class="log-section-head">
+          <div class="mini-eyebrow">Newest Events First</div>
+          <div class="job-meta">${escapeHtml(String(logs.length))} event${logs.length === 1 ? "" : "s"}</div>
+        </div>
+        <div class="log-list">
+        ${latestLogs.map(entry => {
+          const level = escapeHtml(entry.level || "info");
+          const batch = hasBatchIndex(entry.batch_index) ? `Batch ${Number(entry.batch_index)}` : "System";
+          return `
+            <article class="log-entry">
+              <div class="log-entry-head">
+                <span class="log-time">${escapeHtml(formatTimestamp(entry.timestamp))}</span>
+                <span class="log-badge ${level}">${level}</span>
+                <span class="log-batch">${escapeHtml(batch)}</span>
+              </div>
+              <div class="log-message">${escapeHtml(entry.message || "")}</div>
+            </article>
+          `;
+        }).join("")}
         </div>
       </div>
-    ` : ""}
-    ${issues.length ? `
-      <div class="log-section">
+    </section>
+    <section class="log-tab-panel ${activeTab === "references" ? "active" : ""}" data-log-panel="references">
+      ${referenceTracks.length ? `
+        <div class="mini-eyebrow">Reference Track Alignment</div>
+        <p class="job-meta">Reference tracks are supporting context only. The primary subtitle remains canonical.</p>
+        <div class="reference-track-summary-list">
+          ${referenceTracks.map(track => renderReferenceTrackSummary(track, false, sourceCount)).join("")}
+        </div>
+      ` : `<p class="job-meta">No reference subtitles were loaded for this job.</p>`}
+    </section>
+    <section class="log-tab-panel ${activeTab === "issues" ? "active" : ""}" data-log-panel="issues">
+      ${issues.length ? `
         <div class="mini-eyebrow">Flagged Subtitle Lines</div>
         <div class="issue-list">
           ${issues.map(issue => `
@@ -1625,16 +1816,10 @@ function renderLogDialog(job) {
             </article>
           `).join("")}
         </div>
-      </div>
-    ` : ""}
+      ` : `<p class="job-meta">No flagged subtitle lines yet.</p>`}
+    </section>
   `;
-  if (wasNearBottom) {
-    logDialogBody.scrollTop = logDialogBody.scrollHeight;
-    return;
-  }
-  const nextScrollHeight = logDialogBody.scrollHeight;
-  const heightDelta = Math.max(0, nextScrollHeight - previousScrollHeight);
-  logDialogBody.scrollTop = previousScrollTop + heightDelta;
+  logDialogBody.scrollTop = 0;
 }
 
 function filterIssues(issues, filter) {
@@ -2225,6 +2410,16 @@ async function performAction(action, jobId, filter = "all") {
     return;
   }
 
+  if (action === "resume") {
+    await fetch(`/api/jobs/${jobId}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_settings: collectRuntimeOverridePayload() }),
+    });
+    await fetchJobs();
+    return;
+  }
+
   await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });
   await fetchJobs();
 }
@@ -2477,6 +2672,15 @@ document.addEventListener("click", (event) => {
       .then(job => renderReviewDialog(job, openReviewFilter));
     return;
   }
+  const logTab = event.target.closest("[data-log-tab]");
+  if (logTab && openLogJobId) {
+    const tab = logTab.dataset.logTab || "events";
+    logDialogTabs.set(openLogJobId, tab);
+    void fetch(`/api/jobs/${openLogJobId}`)
+      .then(response => response.json())
+      .then(job => renderLogDialog(job));
+    return;
+  }
   const detailTrigger = event.target.closest("[data-detail-trigger]");
   if (detailTrigger) {
     detailDialogTitle.textContent = detailTrigger.dataset.detailTitle || "Details";
@@ -2633,6 +2837,7 @@ async function initializeApp() {
   await fetchModelList();
   await fetchJobs();
   setInterval(fetchJobs, 2500);
+  setInterval(updateLiveTimeoutDisplays, 1000);
 }
 
 void initializeApp();

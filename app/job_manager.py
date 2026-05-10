@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from app.models import (
     BatchContextSnapshot,
+    BatchTimingSample,
     JobLogEntry,
     JobStatus,
     QueuedLineRetranslation,
@@ -26,7 +28,7 @@ from app.srt_utils import (
     parse_srt_text,
     strip_ai_disclosure_line,
 )
-from app.translator import OpenAICompatibleTranslator
+from app.translator import OpenAICompatibleTranslator, TranslationStopRequested
 
 
 class JobManager:
@@ -252,6 +254,60 @@ class JobManager:
         existing = {item.batch_index: item for item in job.batch_context_snapshots}
         existing[batch_index] = snapshot
         job.batch_context_snapshots = [existing[index] for index in sorted(existing)]
+
+    def _record_batch_timing(
+        self,
+        job: TranslationJob,
+        batch_index: int,
+        line_count: int,
+        duration_seconds: float,
+    ) -> None:
+        duration = max(0.001, float(duration_seconds or 0.0))
+        sample = BatchTimingSample(
+            batch_index=batch_index,
+            line_count=max(0, int(line_count or 0)),
+            duration_seconds=round(duration, 3),
+            lines_per_second=round(max(0.0, float(line_count or 0) / duration), 6),
+        )
+        existing = {item.batch_index: item for item in job.batch_timing_samples}
+        existing[batch_index] = sample
+        job.batch_timing_samples = [existing[index] for index in sorted(existing)][-40:]
+        self._refresh_job_eta(job)
+
+    def _refresh_job_eta(self, job: TranslationJob) -> None:
+        if job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED}:
+            job.eta_seconds = None
+            job.estimated_completion_at = None
+            return
+
+        total_lines = len(job.original_lines)
+        completed_lines = len({line.position for line in job.translated_lines})
+        remaining_lines = max(0, total_lines - completed_lines)
+        samples = [sample for sample in job.batch_timing_samples if sample.line_count > 0 and sample.duration_seconds > 0]
+        if not remaining_lines or not samples:
+            job.eta_seconds = None
+            job.estimated_completion_at = None
+            return
+
+        # Recent batches should dominate because model latency changes as context,
+        # retries, and batch complexity change over a long subtitle job.
+        weighted_duration_per_line = 0.0
+        weight_total = 0.0
+        recent_samples = samples[-8:]
+        for offset, sample in enumerate(recent_samples, start=1):
+            duration_per_line = sample.duration_seconds / max(1, sample.line_count)
+            weight = float(offset)
+            weighted_duration_per_line += duration_per_line * weight
+            weight_total += weight
+
+        if weight_total <= 0:
+            job.eta_seconds = None
+            job.estimated_completion_at = None
+            return
+
+        eta_seconds = max(1, int(round((weighted_duration_per_line / weight_total) * remaining_lines)))
+        job.eta_seconds = eta_seconds
+        job.estimated_completion_at = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
 
     def _batch_lines_for_index(self, job: TranslationJob, batch_index: int) -> list[SubtitleLine]:
         if batch_index <= 0:
@@ -717,13 +773,18 @@ class JobManager:
             if job.status == JobStatus.PAUSED:
                 job.status = JobStatus.CANCELLED
                 job.completed_at = datetime.now(timezone.utc)
+                job.eta_seconds = None
+                job.estimated_completion_at = None
                 job.message = "Job stopped by user"
                 self._append_log(job, "warn", "Job stopped by user", save=False)
             else:
                 job.stop_requested = True
                 job.pause_requested = False
-                job.message = "Stop requested; waiting for current batch to finish"
-                self._append_log(job, "warn", "Stop requested; waiting for current batch to finish", save=False)
+                job.message = "Stop requested; cancelling active request"
+                self._append_log(job, "warn", "Stop requested; cancelling active request", save=False)
+                task = self.tasks.get(job_id)
+                if task and not task.done():
+                    task.cancel()
             self._save_state()
             return True
         return False
@@ -753,6 +814,43 @@ class JobManager:
             self._append_log(job, "info", "Job resumed", save=False)
         self._start_task(job_id)
         self._save_state()
+        return True
+
+    def update_runtime_settings(self, job_id: str, values: dict[str, object]) -> bool:
+        job = self.jobs.get(job_id)
+        if not job or job.status not in {JobStatus.PAUSED, JobStatus.FAILED}:
+            return False
+
+        allowed_fields = {
+            "max_completion_tokens",
+            "request_timeout_seconds",
+            "prompt_translation_system",
+            "prompt_translation_strict_retry",
+            "prompt_initial_context_system",
+            "prompt_full_context_refresh_system",
+            "prompt_batch_context_refresh_system",
+            "prompt_line_revision_system",
+        }
+        changed: list[str] = []
+        for field_name in allowed_fields:
+            if field_name not in values:
+                continue
+            previous = getattr(job.settings, field_name, None)
+            try:
+                setattr(job.settings, field_name, values[field_name])
+            except Exception:
+                continue
+            if getattr(job.settings, field_name, None) != previous:
+                changed.append(field_name)
+
+        if changed:
+            self._append_log(
+                job,
+                "info",
+                "Updated runtime settings before resume: " + ", ".join(sorted(changed)),
+                save=False,
+            )
+            self._save_state()
         return True
 
     def update_context(self, job_id: str, context: SessionContext, target_language_tips: str | None = None) -> bool:
@@ -803,6 +901,7 @@ class JobManager:
             subtitles, _ = parse_srt_text(job.original_srt)
             batches = chunk_lines(job.original_lines, job.settings.batch_size)
             job.total_batches = len(batches)
+            self._refresh_job_eta(job)
 
             if job.settings.structured_context and job.session_context is None:
                 self._append_log(job, "info", "Building initial context card", save=False)
@@ -817,11 +916,14 @@ class JobManager:
                 if job.stop_requested:
                     job.status = JobStatus.CANCELLED
                     job.completed_at = datetime.now(timezone.utc)
+                    job.eta_seconds = None
+                    job.estimated_completion_at = None
                     job.message = "Job stopped by user"
                     self._append_log(job, "warn", "Job stopped before next batch started", save=False)
                     return
 
                 current_context = deepcopy(job.session_context) if job.session_context else None
+                batch_started = time.monotonic()
                 self._append_log(
                     job,
                     "info",
@@ -836,6 +938,7 @@ class JobManager:
                     current_context,
                     reference_subtitles_by_position=self._reference_payload_for_positions(job, batch_positions),
                     batch_index=batch_index + 1,
+                    should_stop=lambda active_job=job: bool(active_job.stop_requested),
                     log_event=lambda level, message, batch_no=batch_index + 1: self._append_log(
                         job,
                         level,
@@ -859,11 +962,20 @@ class JobManager:
 
                 job.current_batch = batch_index + 1
                 job.progress = int((job.current_batch / len(batches)) * 100)
+                self._record_batch_timing(
+                    job,
+                    job.current_batch,
+                    len(batches[batch_index]),
+                    time.monotonic() - batch_started,
+                )
                 job.message = f"Processed batch {job.current_batch}/{len(batches)}"
                 self._append_log(
                     job,
                     "info",
-                    f"Finished batch {job.current_batch}/{len(batches)}",
+                    (
+                        f"Finished batch {job.current_batch}/{len(batches)}"
+                        + (f"; ETA {job.eta_seconds}s" if job.eta_seconds else "")
+                    ),
                     batch_index=job.current_batch,
                     save=False,
                 )
@@ -873,6 +985,7 @@ class JobManager:
                     await self._process_pending_retranslations(job, "pause boundary")
                     job.pause_requested = False
                     job.status = JobStatus.PAUSED
+                    job.estimated_completion_at = None
                     job.message = "Paused after current batch"
                     self._append_log(job, "info", "Paused after current batch", batch_index=job.current_batch, save=False)
                     self._save_state()
@@ -881,6 +994,8 @@ class JobManager:
                 if job.stop_requested:
                     job.status = JobStatus.CANCELLED
                     job.completed_at = datetime.now(timezone.utc)
+                    job.eta_seconds = None
+                    job.estimated_completion_at = None
                     job.message = "Job stopped by user"
                     self._append_log(job, "warn", "Job stopped after current batch", batch_index=job.current_batch, save=False)
                     self._save_state()
@@ -890,15 +1005,30 @@ class JobManager:
             job.translated_srt = compose_translated_srt(subtitles, job.translated_lines)
             job.status = JobStatus.COMPLETED
             job.progress = 100
+            job.eta_seconds = None
+            job.estimated_completion_at = None
             job.completed_at = datetime.now(timezone.utc)
             job.message = "Translation completed"
             self._append_log(job, "info", "Translation completed", save=False)
             self._save_state()
+        except (asyncio.CancelledError, TranslationStopRequested):
+            if job.stop_requested:
+                job.status = JobStatus.CANCELLED
+                job.completed_at = datetime.now(timezone.utc)
+                job.eta_seconds = None
+                job.estimated_completion_at = None
+                job.message = "Job stopped by user"
+                self._append_log(job, "warn", "Job stopped by user", batch_index=job.current_batch or None, save=False)
+                self._save_state()
+                return
+            raise
         except Exception as exc:
             error_text = str(exc).strip() or exc.__class__.__name__
             job.status = JobStatus.FAILED
             job.error = error_text
             job.completed_at = datetime.now(timezone.utc)
+            job.eta_seconds = None
+            job.estimated_completion_at = None
             job.message = f"Translation failed: {error_text}"
             self._append_log(job, "error", f"Translation failed: {error_text}", save=False)
             self._save_state()

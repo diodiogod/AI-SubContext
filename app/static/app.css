@@ -752,6 +752,7 @@ button.danger {
   box-shadow: none;
 }
 .job:hover .job-corner-log,
+.context-card:hover .job-corner-log,
 .job-corner-log:hover {
   opacity: 0.82;
   background:
@@ -787,6 +788,17 @@ button.danger {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.025);
 }
+.reference-track-summary.strong {
+  border-color: rgba(125, 211, 140, 0.26);
+}
+.reference-track-summary.mixed {
+  border-color: rgba(243, 191, 120, 0.34);
+  background: rgba(243, 191, 120, 0.035);
+}
+.reference-track-summary.weak {
+  border-color: rgba(255, 128, 112, 0.38);
+  background: rgba(255, 128, 112, 0.035);
+}
 .reference-track-summary.compact {
   padding: 0.62rem 0.75rem;
   gap: 0.38rem;
@@ -801,6 +813,51 @@ button.danger {
 .reference-track-summary-head .job-meta,
 .reference-line-card .job-meta {
   margin-top: 0;
+}
+.reference-track-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.runtime-warning {
+  margin: 0.85rem 0;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(243, 191, 120, 0.38);
+  border-radius: 16px;
+  color: #ffe2b5;
+  background:
+    linear-gradient(135deg, rgba(243, 191, 120, 0.12), rgba(255, 128, 112, 0.07)),
+    rgba(255, 255, 255, 0.02);
+  line-height: 1.45;
+}
+.runtime-warning.compact {
+  margin: 0.65rem 0 0;
+  font-size: 0.85rem;
+}
+.eta-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.7rem 0 0;
+  padding: 0.58rem 0.75rem;
+  border: 1px solid rgba(120, 230, 222, 0.3);
+  border-radius: 999px;
+  background: rgba(120, 230, 222, 0.08);
+  color: var(--accent-strong);
+}
+.eta-pill span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.eta-pill strong {
+  color: var(--text);
+  font-size: 0.92rem;
 }
 .badge {
   display: inline-flex;
@@ -1203,10 +1260,80 @@ code {
   max-height: 65vh;
   overflow: auto;
 }
+.log-tabs {
+  position: sticky;
+  top: -1rem;
+  z-index: 3;
+  display: flex;
+  gap: 0.45rem;
+  padding: 0.2rem 0 0.75rem;
+  margin-bottom: 0.7rem;
+  background: linear-gradient(180deg, rgba(7, 12, 16, 0.98), rgba(7, 12, 16, 0.86));
+  backdrop-filter: blur(10px);
+}
+.log-tab {
+  border-radius: 999px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  font-size: 0.82rem;
+  box-shadow: none;
+}
+.log-tab.active {
+  color: var(--text);
+  border-color: rgba(120, 230, 222, 0.35);
+  background: rgba(120, 230, 222, 0.1);
+}
+.log-tab:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.log-tab-panel {
+  display: none;
+}
+.log-tab-panel.active {
+  display: block;
+}
 .log-section + .log-section {
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--line);
+}
+.log-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+}
+.log-overview-item {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.log-overview-item span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.log-overview-item strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+.log-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.7rem;
+}
+.log-section-head .job-meta {
+  margin: 0;
 }
 .log-list {
   display: grid;
@@ -1221,6 +1348,19 @@ code {
   border-radius: 16px;
   padding: 0.8rem 0.9rem;
   background: rgba(255, 255, 255, 0.025);
+}
+.log-entry.latest {
+  margin-bottom: 0.9rem;
+  border-color: rgba(120, 230, 222, 0.28);
+  background:
+    linear-gradient(135deg, rgba(120, 230, 222, 0.08), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.025);
+}
+.log-entry.latest.warn {
+  border-color: rgba(243, 191, 120, 0.34);
+}
+.log-entry.latest.error {
+  border-color: rgba(255, 128, 112, 0.38);
 }
 .issue-entry {
   border: 1px solid var(--line);
@@ -1307,6 +1447,11 @@ code {
 .log-badge.auto_fixed,
 .log-badge.manual_fixed {
   color: var(--ok);
+}
+@media (max-width: 760px) {
+  .log-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .review-dialog-form {
   gap: 1rem;

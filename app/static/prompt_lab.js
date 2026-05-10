@@ -78,7 +78,7 @@ function savePromptLab() {
     ...collectPromptLabSettings(),
   };
   writeStoredSettings(next);
-  setStatus("Prompt Lab saved. New jobs will use these settings.");
+  setStatus("Prompt Lab saved. New and resumed jobs will use these settings.");
 }
 
 function resetPromptLab() {
@@ -100,7 +100,7 @@ async function initializePromptLab() {
   try {
     await fetchRuntimeDefaults();
     populateFields();
-    setStatus("Prompt Lab ready. Changes affect future jobs only.");
+    setStatus("Prompt Lab ready. Changes affect new jobs and paused/failed jobs when resumed.");
   } catch (error) {
     setStatus(error?.message || "Could not load Prompt Lab.", false);
   }

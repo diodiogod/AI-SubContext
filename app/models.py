@@ -94,6 +94,14 @@ class BatchContextSnapshot(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class BatchTimingSample(BaseModel):
+    batch_index: int
+    line_count: int
+    duration_seconds: float
+    lines_per_second: float
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ReferenceSubtitleMatch(BaseModel):
     position: int
     text: str = ""
@@ -132,6 +140,9 @@ class TranslationJob(BaseModel):
     logs: list[JobLogEntry] = Field(default_factory=list)
     status: JobStatus = JobStatus.QUEUED
     progress: int = 0
+    eta_seconds: int | None = None
+    estimated_completion_at: datetime | None = None
+    batch_timing_samples: list[BatchTimingSample] = Field(default_factory=list)
     message: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
@@ -194,3 +205,7 @@ class RuntimeDefaultsResponse(BaseModel):
 class UpdateContextRequest(BaseModel):
     session_context: dict[str, Any]
     target_language_tips: str | None = None
+
+
+class ResumeJobRequest(BaseModel):
+    runtime_settings: dict[str, Any] = Field(default_factory=dict)

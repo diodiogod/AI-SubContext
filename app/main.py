@@ -16,6 +16,7 @@ from app.models import (
     JobStatus,
     ModelListResponse,
     ModelTestResponse,
+    ResumeJobRequest,
     RetranslateLineRequest,
     RuntimeDefaultsResponse,
     SessionContext,
@@ -262,7 +263,9 @@ async def pause_job(job_id: str) -> dict[str, str]:
 
 
 @app.post("/api/jobs/{job_id}/resume")
-async def resume_job(job_id: str) -> dict[str, str]:
+async def resume_job(job_id: str, request: ResumeJobRequest | None = None) -> dict[str, str]:
+    if request and request.runtime_settings:
+        job_manager.update_runtime_settings(job_id, request.runtime_settings)
     if not job_manager.resume(job_id):
         raise HTTPException(status_code=409, detail="Job cannot be resumed")
     return {"status": JobStatus.QUEUED.value, "message": "Job resumed"}

@@ -1113,11 +1113,16 @@ document.addEventListener("click", (event) => {
   const filterButton = event.target.closest("[data-filter]");
   if (filterButton) {
     const nextFilter = filterButton.dataset.filter || "all";
+    const previousSelectedPosition = selectedPosition;
     if (currentFilter === "suspect" && nextFilter !== "suspect") {
       clearTransientSuspectResolved();
     }
     currentFilter = nextFilter;
     renderAll();
+    if (previousSelectedPosition !== null) {
+      const previousRow = tableBody.querySelector(`[data-row-position="${previousSelectedPosition}"]`);
+      previousRow?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
     return;
   }
   const row = event.target.closest("[data-row-position]");

@@ -5,6 +5,20 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-05-10
+
+### Added
+
+- Active jobs now show adaptive ETA based on completed batch timing
+- Verbose logs now open newest-first with Events, References, and Issues tabs
+- Timeout warnings explain LM Studio background generation and the timeout display updates live
+- Resumed jobs can apply current Prompt Lab runtime settings such as request timeout
+- Stop now cancels active app work instead of waiting through retry and split loops
+- Reference subtitle alignment now shows coverage, confidence, line-count deltas, and quality
+
+### Changed
+
+- Improve translation monitoring and recovery
 ## [0.2.5] - 2026-04-27
 
 ### Added
