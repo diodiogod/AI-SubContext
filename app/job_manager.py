@@ -20,6 +20,8 @@ from app.models import (
     SubtitleLine,
     SubtitleValidationIssue,
     TranslationJob,
+    VisualFrameRecord,
+    VisualFrameLineDetail,
 )
 from app.srt_utils import (
     align_reference_track,
@@ -28,7 +30,18 @@ from app.srt_utils import (
     parse_srt_text,
     strip_ai_disclosure_line,
 )
-from app.translator import OpenAICompatibleTranslator, TranslationStopRequested
+from app.translator import (
+    OpenAICompatibleTranslator,
+    TranslationStopRequested,
+    _looks_like_unchanged_proper_name,
+)
+from app.vision import VideoFrameProvider, validate_visual_doubts
+
+
+class DuplicateActiveJobError(RuntimeError):
+    def __init__(self, job: TranslationJob):
+        self.job = job
+        super().__init__(f"An active job already exists for this subtitle: {job.id}")
 
 
 class JobManager:
@@ -37,6 +50,8 @@ class JobManager:
         self.tasks: dict[str, asyncio.Task] = {}
         self.translator = OpenAICompatibleTranslator()
         self.state_file = self._default_state_file()
+        self.video_dir = self.state_file.parent / "videos"
+        self.vision = VideoFrameProvider(self.state_file.parent / "vision_cache")
         self._load_state()
 
     def _default_state_file(self) -> Path:
@@ -44,6 +59,17 @@ class JobManager:
         data_dir = project_root / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir / "jobs.json"
+
+    def _delete_job_video(self, job: TranslationJob) -> None:
+        if not job.video_path:
+            return
+        try:
+            video_path = Path(job.video_path).resolve()
+            video_dir = self.video_dir.resolve()
+            if video_path.parent == video_dir:
+                video_path.unlink(missing_ok=True)
+        except OSError:
+            return
 
     def _save_state(self) -> None:
         payload = {
@@ -59,6 +85,28 @@ class JobManager:
         temp_path.replace(self.state_file)
 
     def _recover_job_after_restart(self, job: TranslationJob) -> TranslationJob:
+        retained_issues: list[SubtitleValidationIssue] = []
+        for issue in job.validation_issues:
+            false_positive = (
+                "unchanged_from_source" in issue.reason_codes
+                and _looks_like_unchanged_proper_name(
+                    issue.source_text,
+                    issue.translated_text,
+                    job.session_context,
+                )
+            )
+            if false_positive:
+                if issue.status == "error" and job.validation_stats.error_subtitles > 0:
+                    job.validation_stats.error_subtitles -= 1
+                elif issue.status == "suspect" and job.validation_stats.suspicious_subtitles > 0:
+                    job.validation_stats.suspicious_subtitles -= 1
+                continue
+            retained_issues.append(issue)
+        job.validation_issues = retained_issues
+
+        for frame in job.visual_frames:
+            if frame.status == "pending":
+                frame.status = "failed"
         if job.status in {JobStatus.PROCESSING, JobStatus.QUEUED}:
             job.status = JobStatus.PAUSED
             job.pause_requested = False
@@ -121,6 +169,200 @@ class JobManager:
         job.validation_stats.retried_batches += int(getattr(stats, "retried_batches", 0) or 0)
         job.validation_stats.split_batches += int(getattr(stats, "split_batches", 0) or 0)
         self._merge_validation_issues(job, list(getattr(stats, "issues", []) or []))
+
+    async def _apply_adaptive_vision(
+        self,
+        job: TranslationJob,
+        batch_index: int,
+        batch_lines: list[SubtitleLine],
+        translated_lines: list[SubtitleLine],
+        session_context: SessionContext | None,
+        stats,
+    ) -> list[SubtitleLine]:
+        doubts = list(getattr(stats, "visual_doubts", []) or [])
+        if not doubts:
+            return translated_lines
+
+        job.vision_stats.doubts_requested += len(doubts)
+        approved, rejected = validate_visual_doubts(
+            doubts,
+            batch_lines,
+            max_doubts=job.settings.vision_max_doubts,
+        )
+        job.vision_stats.doubts_approved += len(approved)
+        job.vision_stats.doubts_rejected += len(rejected)
+        if rejected:
+            self._append_log(
+                job,
+                "info",
+                f"Rejected {len(rejected)} visual doubt(s) that exceeded limits or failed validation",
+                batch_index=batch_index,
+                save=False,
+            )
+        if not approved:
+            return translated_lines
+
+        frames = []
+        try:
+            frames = await self.vision.extract_for_doubts(
+                job.id,
+                job.video_path,
+                batch_index,
+                batch_lines,
+                approved,
+                max_frames=job.settings.vision_max_frames,
+                max_side=job.settings.vision_frame_max_side,
+            )
+            if not frames:
+                raise RuntimeError("No usable frames were selected")
+            job.vision_stats.clarification_requests += 1
+            before = {line.position: line.text for line in translated_lines}
+            self._record_visual_frames(
+                job,
+                batch_index,
+                frames,
+                approved,
+                batch_lines,
+                before,
+                before,
+                [],
+                [],
+                status="pending",
+            )
+            self._save_state()
+            revised_lines, observations = await self.translator.clarify_visual_doubts(
+                job.settings,
+                batch_lines,
+                translated_lines,
+                session_context,
+                approved,
+                frames,
+                log_event=lambda level, message: self._append_log(
+                    job,
+                    level,
+                    message,
+                    batch_index=batch_index,
+                ),
+            )
+            revised_count = sum(
+                1
+                for line in revised_lines
+                if line.position in before and line.text != before[line.position]
+            )
+            revised_positions = [
+                line.position
+                for line in revised_lines
+                if line.position in before and line.text != before[line.position]
+            ]
+            job.vision_stats.lines_revised += revised_count
+            if observations:
+                job.visual_observations.extend(observations)
+                job.visual_observations = job.visual_observations[-200:]
+            self._record_visual_frames(
+                job,
+                batch_index,
+                frames,
+                approved,
+                batch_lines,
+                before,
+                {line.position: line.text for line in revised_lines},
+                observations,
+                revised_positions,
+                status="used",
+            )
+            self._append_log(
+                job,
+                "info",
+                f"Visual clarification completed; revised {revised_count}/{len(approved)} requested line(s)",
+                batch_index=batch_index,
+                save=False,
+            )
+            return revised_lines
+        except Exception as exc:
+            job.vision_stats.clarification_failures += 1
+            if frames:
+                self._record_visual_frames(
+                    job,
+                    batch_index,
+                    frames,
+                    approved,
+                    batch_lines,
+                    {line.position: line.text for line in translated_lines},
+                    {line.position: line.text for line in translated_lines},
+                    [],
+                    [],
+                    status="failed",
+                )
+            self._append_log(
+                job,
+                "warn",
+                f"Visual clarification failed; keeping provisional translations: {exc}",
+                batch_index=batch_index,
+                save=False,
+            )
+            return translated_lines
+
+    def _record_visual_frames(
+        self,
+        job: TranslationJob,
+        batch_index: int,
+        frames,
+        doubts,
+        batch_lines: list[SubtitleLine],
+        provisional_by_position: dict[int, str],
+        final_by_position: dict[int, str],
+        observations,
+        revised_positions: list[int],
+        status: str,
+    ) -> None:
+        category_by_position = {doubt.position: doubt.category for doubt in doubts}
+        doubt_by_position = {doubt.position: doubt for doubt in doubts}
+        source_by_position = {line.position: line.text for line in batch_lines}
+        observation_by_position = {item.position: item for item in observations}
+        existing = {frame.id: frame for frame in job.visual_frames}
+        for frame in frames:
+            categories = list(
+                dict.fromkeys(
+                    category_by_position[position]
+                    for position in frame.related_positions
+                    if position in category_by_position
+                )
+            )
+            details: list[VisualFrameLineDetail] = []
+            for position in frame.related_positions:
+                doubt = doubt_by_position.get(position)
+                if doubt is None:
+                    continue
+                observation = observation_by_position.get(position)
+                details.append(
+                    VisualFrameLineDetail(
+                        position=position,
+                        category=doubt.category,
+                        question=doubt.question,
+                        source_text=source_by_position.get(position, ""),
+                        provisional_translation=provisional_by_position.get(position, ""),
+                        final_translation=final_by_position.get(position, ""),
+                        answer=observation.answer if observation else "",
+                        confidence=observation.confidence if observation else "unknown",
+                        revised=position in revised_positions,
+                    )
+                )
+            existing[frame.id] = VisualFrameRecord(
+                id=frame.id,
+                batch_index=batch_index,
+                timestamp_ms=frame.timestamp_ms,
+                related_positions=list(frame.related_positions),
+                categories=categories,
+                revised_positions=[
+                    position for position in frame.related_positions if position in revised_positions
+                ],
+                details=details,
+                status=status,
+            )
+        job.visual_frames = sorted(
+            existing.values(),
+            key=lambda frame: (frame.timestamp_ms, frame.batch_index),
+        )[-240:]
 
     def _merge_validation_issues(self, job: TranslationJob, issues) -> None:
         if not issues:
@@ -641,6 +883,8 @@ class JobManager:
             return False
         self.tasks.pop(job_id, None)
         self.jobs.pop(job_id, None)
+        self.vision.remove_job_cache(job_id)
+        self._delete_job_video(job)
         self._save_state()
         return True
 
@@ -648,8 +892,11 @@ class JobManager:
         removable_statuses = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
         removable_ids = [job.id for job in self.jobs.values() if job.status in removable_statuses]
         for job_id in removable_ids:
+            job = self.jobs[job_id]
             self.tasks.pop(job_id, None)
             self.jobs.pop(job_id, None)
+            self.vision.remove_job_cache(job_id)
+            self._delete_job_video(job)
         if removable_ids:
             self._save_state()
         return len(removable_ids)
@@ -661,7 +908,26 @@ class JobManager:
         original_srt: str,
         settings,
         reference_sources: list[dict[str, str]] | None = None,
+        video_filename: str = "",
+        video_path: str = "",
     ) -> TranslationJob:
+        duplicate = next(
+            (
+                job
+                for job in self.jobs.values()
+                if job.job_kind == "translation"
+                and job.status in {JobStatus.QUEUED, JobStatus.PROCESSING}
+                and job.original_srt == original_srt
+                and job.settings.source_language == settings.source_language
+                and job.settings.target_language == settings.target_language
+                and job.settings.model == settings.model
+                and job.settings.base_url.rstrip("/") == settings.base_url.rstrip("/")
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise DuplicateActiveJobError(duplicate)
+
         _, lines = parse_srt_text(original_srt)
         reference_tracks = self._build_reference_tracks(lines, reference_sources)
         job = TranslationJob(
@@ -671,6 +937,8 @@ class JobManager:
             original_srt=original_srt,
             original_lines=lines,
             reference_tracks=reference_tracks,
+            video_filename=video_filename,
+            video_path=video_path,
         )
         self._append_log(job, "info", f"Job created for {filename}", save=False)
         if reference_tracks:
@@ -686,6 +954,8 @@ class JobManager:
                     ),
                     save=False,
                 )
+        if video_path:
+            self._append_log(job, "info", f"Adaptive vision video loaded: {video_filename}", save=False)
         self.jobs[job.id] = job
         self._save_state()
         self._start_task(job.id)
@@ -946,6 +1216,15 @@ class JobManager:
                         batch_index=batch_no,
                     ),
                 )
+                if job.settings.adaptive_vision and job.video_path:
+                    translated_batch = await self._apply_adaptive_vision(
+                        job,
+                        batch_index + 1,
+                        batches[batch_index],
+                        translated_batch,
+                        updated_context,
+                        batch_stats,
+                    )
                 self._apply_validation_stats(job, batch_stats)
                 for item in translated_batch:
                     translated_by_position[item.position] = item

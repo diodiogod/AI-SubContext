@@ -58,6 +58,8 @@ Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using 
 - edit the main context card while a job is running
 - save, inspect, generate, and edit per-batch context snapshots
 - edit all translation and context prompts through Prompt Lab
+- optional adaptive vision with one bounded visual clarification request per batch
+- low-resolution video frames are extracted only when the model reports an approved speaker, object, action, location, or on-screen-text doubt
 
 ### Review
 
@@ -93,6 +95,7 @@ Linux:
 ## Notes
 
 - This project currently focuses on `.srt` only.
+- Adaptive vision requires a multimodal model and FFmpeg available on `PATH`.
 - It expects an OpenAI-compatible endpoint such as LM Studio, OpenRouter, or another compatible local or remote server.
 - Prompt templates and runtime controls are editable in Prompt Lab.
 - Settings are stored in browser local storage for convenience.
@@ -100,4 +103,3 @@ Linux:
 - Review imports detect and ignore AI SubContext's own branded footer subtitle automatically.
 
 - AI SubContext was developed with inspiration from Bazarr workflows and [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator).
-

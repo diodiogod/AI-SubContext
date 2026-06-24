@@ -17,6 +17,11 @@ const contextDialogBody = document.getElementById("context-dialog-body");
 const detailDialog = document.getElementById("detail-dialog");
 const detailDialogTitle = document.getElementById("detail-dialog-title");
 const detailDialogBody = document.getElementById("detail-dialog-body");
+const visionEvidenceDialog = document.getElementById("vision-evidence-dialog");
+const visionEvidenceDialogTitle = document.getElementById("vision-evidence-dialog-title");
+const visionEvidenceDialogBody = document.getElementById("vision-evidence-dialog-body");
+const visionEvidencePrev = document.getElementById("vision-evidence-prev");
+const visionEvidenceNext = document.getElementById("vision-evidence-next");
 const logDialog = document.getElementById("log-dialog");
 const logDialogTitle = document.getElementById("log-dialog-title");
 const logDialogBody = document.getElementById("log-dialog-body");
@@ -32,10 +37,13 @@ const saveSnapshotBtn = document.getElementById("save-snapshot-btn");
 const generateSnapshotBtn = document.getElementById("generate-snapshot-btn");
 const fileInput = document.getElementById("file");
 const translatedFileInput = document.getElementById("translated_file");
+const videoFileInput = document.getElementById("video_file");
 const dropZone = document.getElementById("drop-zone");
 const translatedDropZone = document.getElementById("translated-drop-zone");
+const videoDropZone = document.getElementById("video-file-picker");
 const selectedFile = document.getElementById("selected-file");
 const selectedTranslatedFile = document.getElementById("selected-translated-file");
+const selectedVideoFile = document.getElementById("selected-video-file");
 const referenceTracksCard = document.querySelector(".reference-tracks-card");
 const referenceTracksEl = document.getElementById("reference-tracks");
 const addReferenceTrackBtn = document.getElementById("add-reference-track-btn");
@@ -50,6 +58,9 @@ const connectionTestResult = document.getElementById("connection-test-result");
 const initialCardStrategyInput = document.getElementById("initial_card_strategy");
 const initialCardMaxCharsInput = document.getElementById("initial_card_max_chars");
 const initialCardEstimate = document.getElementById("initial-card-estimate");
+const adaptiveVisionInput = document.getElementById("adaptive_vision");
+const visionControls = document.getElementById("vision-controls");
+const visionReadiness = document.getElementById("vision-readiness");
 const resetPromptLabBtn = document.getElementById("reset-prompt-lab-btn");
 const consoleTabButtons = [...document.querySelectorAll("[data-console-tab]")];
 const consoleTabPanels = [...document.querySelectorAll("[data-console-panel]")];
@@ -69,12 +80,20 @@ let referenceTrackCounter = 0;
 let initialCardEstimateToken = 0;
 let sourceSubtitleTextStats = null;
 let runtimeDefaults = {};
+let createJobInFlight = false;
 const expandedContextHistory = new Set();
 const renderedContextSnapshots = new Map();
 const modelCallParserState = new Map();
 const modelCallRenderedState = new Map();
 const modelCallAnimation = { jobId: null, rafId: null };
 const logDialogTabs = new Map();
+const logDialogReadingState = new Map();
+const visionRailScrollState = new Map();
+const seenVisionFrameIds = new Set();
+const VIDEO_FILE_EXTENSIONS = new Set(["mp4", "mkv", "webm", "mov", "avi", "m4v", "ts"]);
+const jobsById = new Map();
+let openVisionEvidenceJobId = null;
+let openVisionEvidenceFrameId = null;
 
 function readModelCallStats() {
   const raw = localStorage.getItem(MODEL_CALL_STATS_KEY);
@@ -104,6 +123,244 @@ function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function formatMediaTime(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateVisionRailFocus(rail) {
+  if (!rail) return;
+  const frames = [...rail.querySelectorAll(".vision-frame")];
+  if (!frames.length) return;
+  const railRect = rail.getBoundingClientRect();
+  const focusCenter = railRect.left + (railRect.width / 2);
+  const expanded = Boolean(rail.closest(".vision-timeline.expanded"));
+  const minWidth = expanded ? 118 : 68;
+  const maxWidth = expanded ? 190 : 116;
+  const focusRange = Math.max(railRect.width * 0.58, 180);
+
+  for (const frame of frames) {
+    const frameRect = frame.getBoundingClientRect();
+    const frameCenter = frameRect.left + (frameRect.width / 2);
+    const distance = Math.abs(frameCenter - focusCenter);
+    const focus = Math.max(0, 1 - (distance / focusRange));
+    const easedFocus = focus * focus * (3 - (2 * focus));
+    const width = minWidth + ((maxWidth - minWidth) * easedFocus);
+    const opacity = 0.52 + (0.48 * focus);
+    frame.style.setProperty("--frame-focus-width", `${width.toFixed(1)}px`);
+    frame.style.setProperty("--frame-opacity", opacity.toFixed(2));
+  }
+}
+
+function scheduleVisionRailFocus(rail) {
+  if (!rail || rail.dataset.focusFramePending === "true") return;
+  rail.dataset.focusFramePending = "true";
+  requestAnimationFrame(() => {
+    rail.dataset.focusFramePending = "false";
+    updateVisionRailFocus(rail);
+  });
+}
+
+function rememberVisionRailScroll(rail) {
+  const railKey = rail?.dataset?.visionRailKey;
+  if (!railKey) return;
+  const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+  visionRailScrollState.set(railKey, {
+    scrollLeft: rail.scrollLeft,
+    followLatest: maxScroll - rail.scrollLeft <= 24,
+  });
+}
+
+function captureVisionRailScrolls(root = document) {
+  for (const rail of root.querySelectorAll(".vision-rail")) {
+    rememberVisionRailScroll(rail);
+  }
+}
+
+function refreshVisionRails(root = document) {
+  for (const rail of root.querySelectorAll(".vision-rail")) {
+    const railKey = rail.dataset.visionRailKey;
+    if (railKey) {
+      const saved = visionRailScrollState.get(railKey);
+      if (saved) {
+        const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+        rail.scrollLeft = saved.followLatest ? maxScroll : Math.min(saved.scrollLeft, maxScroll);
+      } else {
+        rail.scrollLeft = Math.max(0, rail.scrollWidth - rail.clientWidth);
+        visionRailScrollState.set(railKey, {
+          scrollLeft: rail.scrollLeft,
+          followLatest: true,
+        });
+      }
+    }
+    updateVisionRailFocus(rail);
+  }
+}
+
+function renderVisionTimeline(job, compact = false, location = "timeline") {
+  const frames = Array.isArray(job?.visual_frames) ? job.visual_frames : [];
+  if (!frames.length) return "";
+  const ordered = [...frames].sort((a, b) => {
+    const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
+    return timeDelta || Number(a.batch_index || 0) - Number(b.batch_index || 0);
+  });
+  const visible = compact ? ordered.slice(-24) : ordered.slice(-80);
+  const newestId = visible[visible.length - 1]?.id;
+  const stats = job?.vision_stats || {};
+  return `
+    <section class="vision-timeline ${compact ? "compact" : "expanded"}">
+      <div class="vision-timeline-head">
+        <div>
+          <div class="mini-eyebrow">Visual Evidence</div>
+          <div class="job-meta">${escapeHtml(String(frames.length))} frame${frames.length === 1 ? "" : "s"} collected only when requested</div>
+        </div>
+        <div class="vision-timeline-stats">
+          <span title="Calls: number of batches that triggered one multimodal follow-up request with screenshots.">Calls ${escapeHtml(String(stats.clarification_requests || 0))}</span>
+          <span title="Approved: model-reported visual doubts that passed the app's category, line, question, and per-batch limit checks.">Approved ${escapeHtml(String(stats.doubts_approved || 0))}</span>
+          <span title="Revised: subtitle lines whose provisional translation was changed after the model inspected the requested screenshots.">Revised ${escapeHtml(String(stats.lines_revised || 0))}</span>
+          ${stats.clarification_failures ? `<span class="failed">Failed ${escapeHtml(String(stats.clarification_failures))}</span>` : ""}
+          ${frames.length > visible.length ? `<span class="vision-more">+${escapeHtml(String(frames.length - visible.length))} earlier</span>` : ""}
+          <button type="button" class="vision-rail-control" data-vision-scroll="-1" title="Scroll visual evidence backward" aria-label="Previous screenshots">‹</button>
+          <button type="button" class="vision-rail-control" data-vision-scroll="1" title="Scroll visual evidence forward" aria-label="Next screenshots">›</button>
+        </div>
+      </div>
+      <div class="vision-rail" data-vision-rail-key="${escapeHtml(`${job.id}:${location}`)}">
+        ${visible.map((frame, index) => {
+          const frameId = String(frame.id || "");
+          const isNew = frameId && !seenVisionFrameIds.has(`${job.id}:${frameId}`);
+          if (frameId) seenVisionFrameIds.add(`${job.id}:${frameId}`);
+          const age = visible.length - index - 1;
+          const cappedAge = Math.min(age, 8);
+          const frameOpacity = Math.max(0.48, 1 - cappedAge * 0.055).toFixed(2);
+          const positions = Array.isArray(frame.related_positions) ? frame.related_positions : [];
+          const categories = Array.isArray(frame.categories) ? frame.categories : [];
+          const revised = Array.isArray(frame.revised_positions) ? frame.revised_positions : [];
+          const title = [
+            `Batch ${frame.batch_index || "?"}`,
+            `Time ${formatMediaTime(frame.timestamp_ms)}`,
+            positions.length ? `Lines ${positions.map(position => Number(position) + 1).join(", ")}` : "",
+            categories.length ? categories.join(", ") : "",
+          ].filter(Boolean).join(" · ");
+          return `
+            <button
+              type="button"
+              class="vision-frame ${frame.status === "failed" ? "failed" : ""} ${frame.status === "pending" ? "pending" : ""} ${revised.length ? "revised" : ""} ${frameId === newestId ? "latest" : ""} ${isNew ? "is-new" : ""}"
+              style="--frame-shrink:${cappedAge * 6}px;--frame-opacity:${frameOpacity}"
+              data-vision-frame="${escapeHtml(frameId)}"
+              data-vision-job="${escapeHtml(job.id)}"
+              title="${escapeHtml(title)}"
+            >
+              <img src="/api/jobs/${encodeURIComponent(job.id)}/vision/frames/${encodeURIComponent(frameId)}" alt="Visual evidence at ${escapeHtml(formatMediaTime(frame.timestamp_ms))}" loading="lazy" />
+              <span class="vision-frame-shade"></span>
+              <span class="vision-frame-time">${escapeHtml(formatMediaTime(frame.timestamp_ms))}</span>
+              <span class="vision-frame-batch">B${escapeHtml(String(frame.batch_index || "?"))}</span>
+              ${frame.status === "pending" ? `<span class="vision-frame-pending">analyzing</span>` : ""}
+              ${revised.length ? `<span class="vision-frame-result">revised</span>` : ""}
+            </button>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function openVisionEvidence(jobId, frameId) {
+  const job = jobsById.get(jobId);
+  const frame = (job?.visual_frames || []).find(item => String(item.id) === String(frameId));
+  if (!job || !frame || !visionEvidenceDialog || !visionEvidenceDialogBody) return;
+  const details = Array.isArray(frame.details) ? frame.details : [];
+  const imageUrl = `/api/jobs/${encodeURIComponent(jobId)}/vision/frames/${encodeURIComponent(frameId)}`;
+  const orderedFrames = [...(job.visual_frames || [])].sort((a, b) => {
+    const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
+    return timeDelta || Number(a.batch_index || 0) - Number(b.batch_index || 0);
+  });
+  const frameIndex = orderedFrames.findIndex(item => String(item.id) === String(frameId));
+  openVisionEvidenceJobId = jobId;
+  openVisionEvidenceFrameId = frameId;
+  if (visionEvidencePrev) {
+    visionEvidencePrev.disabled = frameIndex <= 0;
+    visionEvidencePrev.title = frameIndex <= 0 ? "This is the first visual frame." : "Open the previous visual frame.";
+  }
+  if (visionEvidenceNext) {
+    visionEvidenceNext.disabled = frameIndex < 0 || frameIndex >= orderedFrames.length - 1;
+    visionEvidenceNext.title = frameIndex >= orderedFrames.length - 1
+      ? "This is the latest visual frame."
+      : "Open the next visual frame.";
+  }
+  visionEvidenceDialogTitle.textContent = `Batch ${frame.batch_index || "?"} · ${formatMediaTime(frame.timestamp_ms)}`;
+  visionEvidenceDialogBody.innerHTML = `
+    <div class="vision-evidence-layout">
+      <figure class="vision-evidence-image">
+        <img src="${imageUrl}" alt="Visual evidence at ${escapeHtml(formatMediaTime(frame.timestamp_ms))}" />
+        <figcaption>
+          <span>${escapeHtml(job.video_filename || "Source video")}</span>
+          <span>${escapeHtml(frame.status || "used")}</span>
+        </figcaption>
+      </figure>
+      <section class="vision-evidence-copy">
+        <div class="job-facts">
+          <span class="job-fact">Batch ${escapeHtml(String(frame.batch_index || "?"))}</span>
+          <span class="job-fact">Time ${escapeHtml(formatMediaTime(frame.timestamp_ms))}</span>
+          <span class="job-fact">${escapeHtml(String(details.length))} doubt${details.length === 1 ? "" : "s"}</span>
+          <span class="job-fact">${escapeHtml(String((frame.revised_positions || []).length))} revised</span>
+        </div>
+        ${details.length ? details.map(detail => `
+          <article class="vision-evidence-detail ${detail.revised ? "revised" : ""}">
+            <div class="vision-evidence-detail-head">
+              <span class="log-badge info">${escapeHtml(detail.category || "visual")}</span>
+              <span class="log-batch">Line ${escapeHtml(String(Number(detail.position || 0) + 1))}</span>
+              <span class="log-time">${escapeHtml(detail.confidence || "unknown")} confidence</span>
+            </div>
+            <div class="vision-evidence-field">
+              <span>Source subtitle</span>
+              <strong>${escapeHtml(detail.source_text || "Not recorded")}</strong>
+            </div>
+            <div class="vision-evidence-field">
+              <span>Model doubt</span>
+              <strong>${escapeHtml(detail.question || "Question was not recorded for this older frame.")}</strong>
+            </div>
+            <div class="vision-evidence-field">
+              <span>Visual response</span>
+              <strong>${escapeHtml(detail.answer || (frame.status === "pending" ? "The visual request is still running." : "No visual answer was returned."))}</strong>
+            </div>
+            <div class="vision-translation-compare">
+              <div>
+                <span>Before vision</span>
+                <strong>${escapeHtml(detail.provisional_translation || "Not recorded")}</strong>
+              </div>
+              <div class="${detail.revised ? "changed" : ""}">
+                <span>After vision</span>
+                <strong>${escapeHtml(detail.final_translation || detail.provisional_translation || "Not recorded")}</strong>
+              </div>
+            </div>
+          </article>
+        `).join("") : `
+          <p class="job-meta">This frame was recorded before detailed visual evidence history was added.</p>
+        `}
+      </section>
+    </div>
+  `;
+  if (!visionEvidenceDialog.open) visionEvidenceDialog.showModal();
+  visionEvidenceDialogBody.scrollTop = 0;
+}
+
+function navigateVisionEvidence(offset) {
+  const job = jobsById.get(openVisionEvidenceJobId);
+  if (!job || !openVisionEvidenceFrameId) return;
+  const orderedFrames = [...(job.visual_frames || [])].sort((a, b) => {
+    const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
+    return timeDelta || Number(a.batch_index || 0) - Number(b.batch_index || 0);
+  });
+  const currentIndex = orderedFrames.findIndex(item => String(item.id) === String(openVisionEvidenceFrameId));
+  const target = orderedFrames[currentIndex + offset];
+  if (target) openVisionEvidence(job.id, target.id);
 }
 
 function addModelCallDuration(job, seconds) {
@@ -555,6 +812,7 @@ function loadSettings() {
   if (settings.model) {
     rememberModel(settings.model);
   }
+  updateVisionControls();
 }
 
 function saveSettings() {
@@ -621,6 +879,39 @@ function updateSelectedFileLabel() {
 function updateSelectedTranslatedFileLabel() {
   const file = translatedFileInput.files && translatedFileInput.files[0];
   selectedTranslatedFile.innerHTML = file ? escapeHtml(file.name) : `Optional second <code>.srt</code>`;
+}
+
+function updateSelectedVideoFileLabel() {
+  const file = videoFileInput?.files && videoFileInput.files[0];
+  if (selectedVideoFile) {
+    selectedVideoFile.textContent = file
+      ? file.name
+      : "Drop a video here or click to browse; frames are sent only when needed";
+  }
+  updateVisionControls();
+}
+
+function acceptSelectedVideo() {
+  const file = videoFileInput?.files && videoFileInput.files[0];
+  if (file && adaptiveVisionInput) {
+    adaptiveVisionInput.checked = true;
+    saveSettings();
+  }
+  updateSelectedVideoFileLabel();
+}
+
+function updateVisionControls() {
+  const enabled = Boolean(adaptiveVisionInput?.checked);
+  if (visionControls) visionControls.hidden = !enabled;
+  if (!visionReadiness) return;
+  const video = videoFileInput?.files && videoFileInput.files[0];
+  if (!enabled) {
+    visionReadiness.textContent = "";
+  } else if (!video) {
+    visionReadiness.textContent = "Select a source video. Adaptive vision cannot start without it.";
+  } else {
+    visionReadiness.textContent = `${video.name} ready. At most one visual follow-up will be allowed per batch.`;
+  }
 }
 
 function renderReferenceTrackEmptyState() {
@@ -846,6 +1137,54 @@ function latestTimeoutWarning(job) {
   const batch = hasBatchIndex(timeoutLog.batch_index) ? `Batch ${Number(timeoutLog.batch_index)}` : "A model request";
   const configuredTimeout = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
   return `${batch} hit the ${configuredTimeout}s request timeout. The model server may still be generating that abandoned request; if retries stall, cancel it in the model server. You can raise Request Timeout in Prompt Lab > Safety Controls.`;
+}
+
+function runtimeActivity(job) {
+  if (!job || job.status !== "processing") return null;
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  const latest = logs[logs.length - 1] || null;
+  const message = String(latest?.message || job.message || "Processing");
+  const lowered = message.toLowerCase();
+  let label = "Working";
+  let tone = "active";
+
+  if (lowered.includes("retry") || lowered.includes("splitting batch")) {
+    label = "Retrying";
+    tone = "retry";
+  } else if (lowered.includes("visual clarification") || lowered.includes("frame")) {
+    label = "Vision";
+    tone = "vision";
+  } else if (lowered.includes("validation")) {
+    label = "Validating";
+    tone = "validating";
+  } else if (lowered.includes("submitting") || lowered.includes("prompt size")) {
+    label = "Model generating";
+    tone = "generating";
+  } else if (lowered.includes("starting batch")) {
+    label = "Preparing batch";
+  } else if (lowered.includes("finished batch")) {
+    label = "Advancing";
+  }
+
+  return {
+    label,
+    tone,
+    message,
+    batch: hasBatchIndex(latest?.batch_index) ? Number(latest.batch_index) : null,
+  };
+}
+
+function renderRuntimeActivity(job, compact = false) {
+  const activity = runtimeActivity(job);
+  if (!activity) return "";
+  return `
+    <div class="runtime-activity ${escapeHtml(activity.tone)} ${compact ? "compact" : ""}" title="${escapeHtml(activity.message)}">
+      <span class="runtime-activity-dot" aria-hidden="true"></span>
+      <strong>${escapeHtml(activity.label)}</strong>
+      ${activity.batch ? `<span>Batch ${escapeHtml(String(activity.batch))}</span>` : ""}
+      <span class="runtime-activity-message">${escapeHtml(activity.message)}</span>
+    </div>
+  `;
 }
 
 function currentModelCallProgress(job) {
@@ -1514,6 +1853,7 @@ function renderContext(job) {
           ></div>
         </div>
       ` : ""}
+      ${renderRuntimeActivity(job)}
       <div class="actions">
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
@@ -1556,6 +1896,7 @@ function renderContext(job) {
           "error",
         )}
       </div>
+      ${renderVisionTimeline(job, true, "active")}
       ${renderSessionSnapshot(ctx, false, delta)}
       ${previous ? `
         <details class="context-history tile" data-context-history="${escapeHtml(job.id)}" ${expandedContextHistory.has(job.id) ? "open" : ""}>
@@ -1575,6 +1916,8 @@ function renderContext(job) {
 }
 
 function renderJobs(jobs) {
+  captureVisionRailScrolls(activeJobCard);
+  captureVisionRailScrolls(jobsEl);
   if (!jobs.length) {
     jobsEl.innerHTML = `<p class="job-meta">No jobs yet.</p>`;
     activeJobCard.classList.add("hidden");
@@ -1599,6 +1942,7 @@ function renderJobs(jobs) {
     activeJobCard.classList.remove("hidden");
     activeJobCard.innerHTML = renderContext(active);
     animateCurrentModelCallBar(active);
+    requestAnimationFrame(() => refreshVisionRails(activeJobCard));
   } else {
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
@@ -1650,6 +1994,8 @@ function renderJobs(jobs) {
         ? `Show verbose runtime events, retries, and validation decisions. ${logCount} log entries available.`
         : "Show verbose runtime events, retries, and validation decisions.";
       const validation = job.validation_stats || {};
+      const vision = job.vision_stats || {};
+      const visionEnabled = Boolean(job?.settings?.adaptive_vision);
       const issueCount = Array.isArray(job.validation_issues) ? job.validation_issues.length : 0;
       const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
       const canResume = job.status === "paused" || job.status === "failed";
@@ -1676,6 +2022,10 @@ function renderJobs(jobs) {
             <span class="job-fact">${sourceLanguage} → ${targetLanguage}</span>
             <span class="job-fact">${model}</span>
             ${referenceLanguages.length ? `<span class="job-fact">Refs ${escapeHtml(referenceLanguages.join(", "))}</span>` : ""}
+            ${visionEnabled ? `<span class="job-fact">Vision adaptive</span>` : ""}
+            ${vision.clarification_requests ? `<span class="job-fact">Vision calls ${escapeHtml(String(vision.clarification_requests))}</span>` : ""}
+            ${vision.lines_revised ? `<span class="job-fact">Vision revised ${escapeHtml(String(vision.lines_revised))}</span>` : ""}
+            ${vision.clarification_failures ? `<span class="job-fact">Vision failed ${escapeHtml(String(vision.clarification_failures))}</span>` : ""}
             <span class="job-fact">Progress ${progress}</span>
             <span class="job-fact">Timeout ${escapeHtml(String(requestTimeout))}s</span>
             ${(validation.suspicious_subtitles || fixedTotal || validation.error_subtitles) ? `
@@ -1685,12 +2035,14 @@ function renderJobs(jobs) {
             ` : ""}
           </div>
           <div class="job-meta">${message}</div>
+          ${renderRuntimeActivity(job, true)}
           ${timeoutWarning ? `<div class="runtime-warning compact">${escapeHtml(timeoutWarning)}</div>` : ""}
           ${referenceTracks.length ? `
             <div class="reference-track-summary-list">
               ${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}
             </div>
           ` : ""}
+          ${renderVisionTimeline(job, true, "job")}
         </div>
         <div class="job-actions">
           <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
@@ -1710,14 +2062,24 @@ function renderJobs(jobs) {
   `;
     }).join("")}</div>
   `;
+  requestAnimationFrame(() => refreshVisionRails(jobsEl));
 }
 
-function renderLogDialog(job) {
+function renderLogDialog(job, options = {}) {
   if (!job || !logDialogTitle || !logDialogBody) return;
+  captureVisionRailScrolls(logDialogBody);
+  const savedReading = options.restoreReading ? logDialogReadingState.get(job.id) : null;
+  const preserveScroll = Boolean(options.preserveScroll || savedReading);
+  const previousScrollTop = savedReading?.scrollTop ?? logDialogBody.scrollTop;
+  const previousScrollHeight = savedReading?.scrollHeight ?? logDialogBody.scrollHeight;
+  const wasNearTop = previousScrollTop <= 24;
   const title = job.title || job.filename || "Job";
   const logs = Array.isArray(job.logs) ? job.logs : [];
   const issues = Array.isArray(job.validation_issues) ? job.validation_issues : [];
   const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
+  const visualObservations = Array.isArray(job.visual_observations) ? job.visual_observations : [];
+  const visionStats = job.vision_stats || {};
+  const visionEnabled = Boolean(job?.settings?.adaptive_vision);
   const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
   const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
   const latestLogs = [...logs].reverse();
@@ -1728,7 +2090,7 @@ function renderLogDialog(job) {
   const activeTab = logDialogTabs.get(job.id) || "events";
   const issueCount = issues.length;
   logDialogTitle.textContent = `${title} Log`;
-  if (!logs.length && !issues.length && !referenceTracks.length) {
+  if (!logs.length && !issues.length && !referenceTracks.length && !visionEnabled) {
     logDialogBody.innerHTML = `<p class="job-meta">No verbose events yet.</p>`;
     return;
   }
@@ -1736,7 +2098,9 @@ function renderLogDialog(job) {
     <div class="log-tabs" role="tablist" aria-label="Log sections">
       <button type="button" class="log-tab ${activeTab === "events" ? "active" : ""}" data-log-tab="events">Events ${escapeHtml(String(logs.length))}</button>
       <button type="button" class="log-tab ${activeTab === "references" ? "active" : ""}" data-log-tab="references" ${referenceTracks.length ? "" : "disabled"}>References ${escapeHtml(String(referenceTracks.length))}</button>
+      <button type="button" class="log-tab ${activeTab === "vision" ? "active" : ""}" data-log-tab="vision" ${visionEnabled ? "" : "disabled"}>Vision ${escapeHtml(String(visualObservations.length))}</button>
       <button type="button" class="log-tab ${activeTab === "issues" ? "active" : ""}" data-log-tab="issues" ${issueCount ? "" : "disabled"}>Issues ${escapeHtml(String(issueCount))}</button>
+      <span class="log-follow-state">${preserveScroll && !wasNearTop ? "Reading position locked" : "Following newest"}</span>
     </div>
     <div class="log-overview">
       <div class="log-overview-item">
@@ -1755,7 +2119,14 @@ function renderLogDialog(job) {
         <span>Timeout</span>
         <strong title="${escapeHtml(timeoutInfo.detail)}"${timeoutInfoAttrs(timeoutInfo)}>${escapeHtml(timeoutInfo.label)}</strong>
       </div>
+      ${visionEnabled ? `
+        <div class="log-overview-item">
+          <span>Vision</span>
+          <strong>${escapeHtml(String(visionStats.lines_revised || 0))} revised</strong>
+        </div>
+      ` : ""}
     </div>
+    ${renderRuntimeActivity(job)}
     <section class="log-tab-panel ${activeTab === "events" ? "active" : ""}" data-log-panel="events">
       ${latestEvent ? `
         <article class="log-entry latest ${latestLevel}">
@@ -1799,6 +2170,37 @@ function renderLogDialog(job) {
         </div>
       ` : `<p class="job-meta">No reference subtitles were loaded for this job.</p>`}
     </section>
+    <section class="log-tab-panel ${activeTab === "vision" ? "active" : ""}" data-log-panel="vision">
+      ${visionEnabled ? `
+        <div class="mini-eyebrow">Adaptive Vision</div>
+        <p class="job-meta">
+          ${escapeHtml(job.video_filename || "Source video loaded")}. One combined visual follow-up is permitted per batch.
+        </p>
+        <div class="job-facts">
+          <span class="job-fact">Requested ${escapeHtml(String(visionStats.doubts_requested || 0))}</span>
+          <span class="job-fact" title="Model-reported visual doubts that passed the app's validation and per-batch limits.">Approved ${escapeHtml(String(visionStats.doubts_approved || 0))}</span>
+          <span class="job-fact">Rejected ${escapeHtml(String(visionStats.doubts_rejected || 0))}</span>
+          <span class="job-fact" title="Batches that triggered one multimodal follow-up request with screenshots.">Calls ${escapeHtml(String(visionStats.clarification_requests || 0))}</span>
+          <span class="job-fact" title="Subtitle lines changed after the model inspected the requested screenshots.">Revised ${escapeHtml(String(visionStats.lines_revised || 0))}</span>
+          <span class="job-fact">Failed ${escapeHtml(String(visionStats.clarification_failures || 0))}</span>
+        </div>
+        ${renderVisionTimeline(job, false, "log")}
+        ${visualObservations.length ? `
+          <div class="issue-list">
+            ${[...visualObservations].reverse().map(observation => `
+              <article class="issue-entry">
+                <div class="issue-entry-head">
+                  <span class="log-badge info">${escapeHtml(observation.category || "visual")}</span>
+                  <span class="log-batch">Line ${escapeHtml(String((observation.position ?? 0) + 1))}</span>
+                  <span class="log-time">${escapeHtml(observation.confidence || "unknown")} confidence</span>
+                </div>
+                <div class="issue-copy">${escapeHtml(observation.answer || "No visual answer recorded.")}</div>
+              </article>
+            `).join("")}
+          </div>
+        ` : `<p class="job-meta">No visual clarification has been needed yet.</p>`}
+      ` : `<p class="job-meta">Adaptive vision is disabled for this job.</p>`}
+    </section>
     <section class="log-tab-panel ${activeTab === "issues" ? "active" : ""}" data-log-panel="issues">
       ${issues.length ? `
         <div class="mini-eyebrow">Flagged Subtitle Lines</div>
@@ -1819,7 +2221,17 @@ function renderLogDialog(job) {
       ` : `<p class="job-meta">No flagged subtitle lines yet.</p>`}
     </section>
   `;
-  logDialogBody.scrollTop = 0;
+  if (preserveScroll && !wasNearTop) {
+    const heightDelta = logDialogBody.scrollHeight - previousScrollHeight;
+    logDialogBody.scrollTop = Math.max(0, previousScrollTop + heightDelta);
+  } else {
+    logDialogBody.scrollTop = 0;
+  }
+  logDialogReadingState.set(job.id, {
+    scrollTop: logDialogBody.scrollTop,
+    scrollHeight: logDialogBody.scrollHeight,
+  });
+  requestAnimationFrame(() => refreshVisionRails(logDialogBody));
 }
 
 function filterIssues(issues, filter) {
@@ -2108,6 +2520,10 @@ function renderReviewDialog(job, filter = "all") {
 async function fetchJobs() {
   const response = await fetch("/api/jobs");
   const jobs = await response.json();
+  jobsById.clear();
+  for (const job of jobs) {
+    jobsById.set(job.id, job);
+  }
   for (const job of jobs) {
     learnModelCallDurations(job);
   }
@@ -2121,7 +2537,7 @@ async function fetchJobs() {
   if (openLogJobId) {
     const openJob = jobs.find(job => job.id === openLogJobId);
     if (openJob) {
-      renderLogDialog(openJob);
+      renderLogDialog(openJob, { preserveScroll: true });
     } else if (logDialog?.open) {
       logDialog.close();
       openLogJobId = null;
@@ -2183,13 +2599,27 @@ async function fetchModelList() {
 
 async function createJob(event) {
   event.preventDefault();
+  if (createJobInFlight) return;
   saveSettings();
   const referenceTracks = collectReferenceTracks();
   if (referenceTracks === null) return;
   const data = new FormData();
   const file = fileInput.files[0];
   if (!file) return;
+  const videoFile = videoFileInput?.files && videoFileInput.files[0];
+  if (adaptiveVisionInput?.checked && !videoFile) {
+    alert("Select a source video or turn off adaptive vision.");
+    return;
+  }
+  const submitButton = form.querySelector('button[type="submit"]');
+  const originalSubmitText = submitButton?.textContent || "Translate Subtitle";
+  createJobInFlight = true;
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = "Creating Job...";
+  }
   data.append("file", file);
+  if (adaptiveVisionInput?.checked && videoFile) data.append("video_file", videoFile);
   for (const track of referenceTracks) {
     data.append("reference_languages", track.language);
     data.append("reference_files", track.file);
@@ -2203,22 +2633,33 @@ async function createJob(event) {
     }
   }
 
-  const response = await fetch("/api/jobs", {
-    method: "POST",
-    body: data,
-  });
-  if (!response.ok) {
-    alert("Could not create job.");
-    return;
+  try {
+    const response = await fetch("/api/jobs", {
+      method: "POST",
+      body: data,
+    });
+    if (!response.ok) {
+      alert(await responseErrorDetail(response, "Could not create job."));
+      return;
+    }
+    rememberLanguageTip(payload.target_language_tips);
+    rememberModel(document.getElementById("model")?.value);
+    form.reset();
+    loadSettings();
+    updateSelectedFileLabel();
+    updateSelectedTranslatedFileLabel();
+    updateSelectedVideoFileLabel();
+    resetReferenceTrackRows();
+    await fetchJobs();
+  } catch (error) {
+    alert(error?.message || "Could not create job.");
+  } finally {
+    createJobInFlight = false;
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = originalSubmitText;
+    }
   }
-  rememberLanguageTip(payload.target_language_tips);
-  rememberModel(document.getElementById("model")?.value);
-  form.reset();
-  loadSettings();
-  updateSelectedFileLabel();
-  updateSelectedTranslatedFileLabel();
-  resetReferenceTrackRows();
-  await fetchJobs();
 }
 
 async function createReviewJob() {
@@ -2283,6 +2724,17 @@ function setInputFile(input, file) {
 function handleDroppedFiles(files, targetInput = fileInput) {
   if (!files || !files.length) return;
   const file = files[0];
+  if (targetInput === videoFileInput) {
+    const extension = String(file.name || "").toLowerCase().split(".").pop();
+    const isVideo = String(file.type || "").startsWith("video/") || VIDEO_FILE_EXTENSIONS.has(extension);
+    if (!isVideo) {
+      alert("Drop a supported video file: MP4, MKV, WebM, MOV, AVI, M4V, or TS.");
+      return;
+    }
+    setInputFile(targetInput, file);
+    acceptSelectedVideo();
+    return;
+  }
   if (!file.name.toLowerCase().endsWith(".srt")) {
     alert("Only .srt files are supported.");
     return;
@@ -2380,7 +2832,7 @@ async function performAction(action, jobId, filter = "all") {
     const response = await fetch(`/api/jobs/${jobId}`);
     const job = await response.json();
     openLogJobId = jobId;
-    renderLogDialog(job);
+    renderLogDialog(job, { restoreReading: true });
     logDialog.showModal();
     return;
   }
@@ -2611,6 +3063,28 @@ document.addEventListener("click", (event) => {
     window.location.href = workspaceCard.dataset.workspaceUrl;
     return;
   }
+  const visionFrame = event.target.closest("[data-vision-frame][data-vision-job]");
+  if (visionFrame) {
+    event.preventDefault();
+    event.stopPropagation();
+    openVisionEvidence(visionFrame.dataset.visionJob, visionFrame.dataset.visionFrame);
+    return;
+  }
+  const visionScroll = event.target.closest("[data-vision-scroll]");
+  if (visionScroll) {
+    event.preventDefault();
+    event.stopPropagation();
+    const rail = visionScroll.closest(".vision-timeline")?.querySelector(".vision-rail");
+    if (!rail) return;
+    const direction = Number(visionScroll.dataset.visionScroll || 0);
+    rail.scrollBy({
+      left: direction * Math.max(220, rail.clientWidth * 0.72),
+      behavior: "smooth",
+    });
+    rememberVisionRailScroll(rail);
+    window.setTimeout(() => scheduleVisionRailFocus(rail), 180);
+    return;
+  }
   const referenceRemove = event.target.closest("[data-reference-remove]");
   if (referenceRemove) {
     removeReferenceTrackRow(referenceRemove);
@@ -2792,6 +3266,33 @@ snapshotDialog?.addEventListener("close", () => {
   openSnapshotJobId = null;
   openSnapshotBatchIndex = null;
 });
+logDialogBody?.addEventListener("scroll", () => {
+  if (!openLogJobId) return;
+  logDialogReadingState.set(openLogJobId, {
+    scrollTop: logDialogBody.scrollTop,
+    scrollHeight: logDialogBody.scrollHeight,
+  });
+}, { passive: true });
+document.addEventListener("scroll", (event) => {
+  const rail = event.target instanceof Element && event.target.matches(".vision-rail")
+    ? event.target
+    : null;
+  if (rail) {
+    rememberVisionRailScroll(rail);
+    scheduleVisionRailFocus(rail);
+  }
+}, true);
+document.addEventListener("wheel", (event) => {
+  const rail = event.target instanceof Element ? event.target.closest(".vision-rail") : null;
+  if (!rail || rail.scrollWidth <= rail.clientWidth) return;
+  const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  if (!horizontalDelta) return;
+  event.preventDefault();
+  rail.scrollLeft += horizontalDelta;
+  rememberVisionRailScroll(rail);
+  scheduleVisionRailFocus(rail);
+}, { passive: false });
+window.addEventListener("resize", () => refreshVisionRails(), { passive: true });
 dialog?.addEventListener("close", () => {
   closeLanguageTipsMenus();
   if (editingJobId) {
@@ -2802,6 +3303,27 @@ dialog?.addEventListener("close", () => {
 });
 fileInput.addEventListener("change", updateSelectedFileLabel);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
+videoFileInput?.addEventListener("change", acceptSelectedVideo);
+visionEvidencePrev?.addEventListener("click", () => navigateVisionEvidence(-1));
+visionEvidenceNext?.addEventListener("click", () => navigateVisionEvidence(1));
+visionEvidenceDialog?.addEventListener("close", () => {
+  openVisionEvidenceJobId = null;
+  openVisionEvidenceFrameId = null;
+});
+document.addEventListener("keydown", (event) => {
+  if (!visionEvidenceDialog?.open) return;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigateVisionEvidence(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    navigateVisionEvidence(1);
+  }
+});
+adaptiveVisionInput?.addEventListener("change", () => {
+  saveSettings();
+  updateVisionControls();
+});
 initialCardStrategyInput?.addEventListener("change", () => void refreshInitialCardEstimate());
 initialCardMaxCharsInput?.addEventListener("input", () => void refreshInitialCardEstimate());
 modelInput.addEventListener("change", () => rememberModel(modelInput.value));
@@ -2816,6 +3338,7 @@ loadModelsBtn.addEventListener("click", () => void fetchModelList());
 reviewExistingBtn.addEventListener("click", () => void createReviewJob());
 bindDropZone(dropZone, fileInput);
 bindDropZone(translatedDropZone, translatedFileInput);
+bindDropZone(videoDropZone, videoFileInput);
 bindReferenceTrackCard(referenceTracksCard);
 setConsoleTab("runtime");
 renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
@@ -2829,6 +3352,7 @@ async function initializeApp() {
   renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
   updateSelectedFileLabel();
   updateSelectedTranslatedFileLabel();
+  updateSelectedVideoFileLabel();
   renderReferenceTrackEmptyState();
   await refreshInitialCardEstimate();
   requestAnimationFrame(() => {

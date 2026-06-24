@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.config import TranslationSettings
-from app.job_manager import job_manager
+from app.job_manager import DuplicateActiveJobError, job_manager
 from app.models import (
     CreateJobResponse,
     GenerateContextResponse,
@@ -29,6 +31,7 @@ from app.version import __version__
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
 
 app = FastAPI(title="AI SubContext", version=__version__)
 app.add_middleware(
@@ -38,6 +41,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _job_payload(job) -> dict:
+    return job.model_dump(mode="json", exclude={"video_path"})
 
 
 @app.get("/")
@@ -67,7 +74,7 @@ async def runtime_defaults() -> RuntimeDefaultsResponse:
 
 @app.get("/api/jobs")
 async def list_jobs() -> list[dict]:
-    return [job.model_dump(mode="json") for job in job_manager.list_jobs()]
+    return [_job_payload(job) for job in job_manager.list_jobs()]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -75,7 +82,25 @@ async def get_job(job_id: str) -> dict:
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.model_dump(mode="json")
+    return _job_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/vision/frames/{frame_id}")
+async def get_vision_frame(job_id: str, frame_id: str) -> FileResponse:
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    frame = next((item for item in job.visual_frames if item.id == frame_id), None)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="Vision frame not found")
+    frame_path = job_manager.vision.frame_path(job.id, frame.batch_index, frame.timestamp_ms)
+    if not frame_path.is_file():
+        raise HTTPException(status_code=404, detail="Vision frame file not found")
+    return FileResponse(
+        frame_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 async def _read_reference_sources(
@@ -105,9 +130,43 @@ async def _read_reference_sources(
     return references
 
 
+async def _save_video_upload(upload: UploadFile) -> str:
+    filename = str(upload.filename or "").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported video format. Use MP4, MKV, WebM, MOV, AVI, M4V, or TS.",
+        )
+    job_manager.video_dir.mkdir(parents=True, exist_ok=True)
+    destination = job_manager.video_dir / f"{uuid4().hex}{suffix}"
+    try:
+        with destination.open("wb") as output:
+            while chunk := await upload.read(1024 * 1024):
+                output.write(chunk)
+    except DuplicateActiveJobError as exc:
+        if video_path:
+            Path(video_path).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This subtitle is already being translated by active job {exc.job.id} "
+                f"at batch {exc.job.current_batch}/{exc.job.total_batches or '?'}."
+            ),
+        ) from exc
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    if not destination.is_file() or destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="The uploaded video is empty")
+    return str(destination)
+
+
 @app.post("/api/jobs", response_model=CreateJobResponse)
 async def create_job(
     file: UploadFile = File(...),
+    video_file: UploadFile | None = File(default=None),
     reference_files: list[UploadFile] | None = File(default=None),
     reference_languages: list[str] | None = Form(default=None),
     title: str = Form(default=""),
@@ -120,6 +179,10 @@ async def create_job(
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
+    adaptive_vision: bool = Form(default=False),
+    vision_max_doubts: int = Form(default=3),
+    vision_max_frames: int = Form(default=2),
+    vision_frame_max_side: int = Form(default=448),
     initial_card_strategy: str = Form(default="auto"),
     initial_card_max_chars: int = Form(default=24000),
     max_completion_tokens: int = Form(default=1800),
@@ -146,6 +209,10 @@ async def create_job(
             batch_size=batch_size,
             temperature=temperature,
             structured_context=structured_context,
+            adaptive_vision=adaptive_vision,
+            vision_max_doubts=vision_max_doubts,
+            vision_max_frames=vision_max_frames,
+            vision_frame_max_side=vision_frame_max_side,
             initial_card_strategy=initial_card_strategy,
             initial_card_max_chars=initial_card_max_chars,
             max_completion_tokens=max_completion_tokens,
@@ -160,14 +227,27 @@ async def create_job(
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
+    if adaptive_vision and not (video_file and video_file.filename):
+        raise HTTPException(status_code=400, detail="Adaptive vision requires a video file")
+
     reference_sources = await _read_reference_sources(reference_files, reference_languages)
-    job = job_manager.create_job(
-        filename=file.filename,
-        title=title,
-        original_srt=content,
-        settings=settings,
-        reference_sources=reference_sources,
-    )
+    video_path = ""
+    if adaptive_vision and video_file and video_file.filename:
+        video_path = await _save_video_upload(video_file)
+    try:
+        job = job_manager.create_job(
+            filename=file.filename,
+            title=title,
+            original_srt=content,
+            settings=settings,
+            reference_sources=reference_sources,
+            video_filename=str(video_file.filename or "") if adaptive_vision and video_file else "",
+            video_path=video_path,
+        )
+    except Exception:
+        if video_path:
+            Path(video_path).unlink(missing_ok=True)
+        raise
     return CreateJobResponse(job_id=job.id)
 
 
@@ -288,7 +368,7 @@ async def update_context(job_id: str, request: UpdateContextRequest) -> dict:
     if not job_manager.update_context(job_id, context, request.target_language_tips):
         raise HTTPException(status_code=409, detail="Job context cannot be updated")
     job = job_manager.get_job(job_id)
-    return job.model_dump(mode="json")
+    return _job_payload(job)
 
 
 @app.post("/api/jobs/{job_id}/context/generate", response_model=GenerateContextResponse)
@@ -311,7 +391,7 @@ async def update_batch_context_snapshot(job_id: str, batch_index: int, request: 
     job = job_manager.update_batch_context_snapshot(job_id, batch_index, context)
     if not job:
         raise HTTPException(status_code=404, detail="Batch context snapshot not found")
-    return job.model_dump(mode="json")
+    return _job_payload(job)
 
 
 @app.post("/api/jobs/{job_id}/batch-context/{batch_index}/generate", response_model=GenerateContextResponse)
@@ -330,7 +410,7 @@ async def update_translated_line(job_id: str, position: int, request: UpdateTran
     job = job_manager.update_translated_line(job_id, position, request.text, request.resolution_mode)
     if not job:
         raise HTTPException(status_code=404, detail="Translated subtitle line not found")
-    return job.model_dump(mode="json")
+    return _job_payload(job)
 
 
 @app.post("/api/jobs/{job_id}/lines/{position}/retranslate")
@@ -346,7 +426,7 @@ async def retranslate_line(job_id: str, position: int, request: RetranslateLineR
             if queued
             else f"Retranslation finished for line {position + 1}"
         ),
-        "job": job.model_dump(mode="json"),
+        "job": _job_payload(job),
     }
 
 

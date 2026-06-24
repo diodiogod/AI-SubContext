@@ -69,6 +69,53 @@ class JobValidationStats(BaseModel):
     split_batches: int = 0
 
 
+class JobVisionStats(BaseModel):
+    doubts_requested: int = 0
+    doubts_approved: int = 0
+    doubts_rejected: int = 0
+    clarification_requests: int = 0
+    lines_revised: int = 0
+    clarification_failures: int = 0
+
+
+class VisualDoubt(BaseModel):
+    position: int
+    category: str
+    question: str
+    timestamp_hint: str = "middle"
+
+
+class VisualObservation(BaseModel):
+    position: int
+    category: str
+    answer: str = ""
+    confidence: str = "unknown"
+
+
+class VisualFrameLineDetail(BaseModel):
+    position: int
+    category: str
+    question: str = ""
+    source_text: str = ""
+    provisional_translation: str = ""
+    final_translation: str = ""
+    answer: str = ""
+    confidence: str = "unknown"
+    revised: bool = False
+
+
+class VisualFrameRecord(BaseModel):
+    id: str
+    batch_index: int
+    timestamp_ms: int
+    related_positions: list[int] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    revised_positions: list[int] = Field(default_factory=list)
+    details: list[VisualFrameLineDetail] = Field(default_factory=list)
+    status: str = "used"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class SubtitleValidationIssue(BaseModel):
     position: int
     status: str = "suspect"
@@ -131,10 +178,15 @@ class TranslationJob(BaseModel):
     original_lines: list[SubtitleLine]
     translated_lines: list[SubtitleLine] = Field(default_factory=list)
     reference_tracks: list[ReferenceSubtitleTrack] = Field(default_factory=list)
+    video_filename: str = ""
+    video_path: str = ""
     session_context: SessionContext | None = None
     session_context_history: list[dict[str, Any]] = Field(default_factory=list)
     batch_context_snapshots: list[BatchContextSnapshot] = Field(default_factory=list)
     validation_stats: JobValidationStats = Field(default_factory=JobValidationStats)
+    vision_stats: JobVisionStats = Field(default_factory=JobVisionStats)
+    visual_observations: list[VisualObservation] = Field(default_factory=list)
+    visual_frames: list[VisualFrameRecord] = Field(default_factory=list)
     validation_issues: list[SubtitleValidationIssue] = Field(default_factory=list)
     pending_retranslations: list[QueuedLineRetranslation] = Field(default_factory=list)
     logs: list[JobLogEntry] = Field(default_factory=list)

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260510-5" />
+    <link rel="stylesheet" href="/static/app.css?v=20260624-4" />
   </head>
   <body>
     <main class="shell">
@@ -49,6 +49,16 @@
               <input type="file" id="translated_file" accept=".srt" hidden />
               <span class="secondary-file-label">Translated File for Review</span>
               <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
+            </label>
+            <label
+              id="video-file-picker"
+              class="secondary-file"
+              for="video_file"
+              title="Optional source video for adaptive visual clarification. Frames are extracted only when the model reports an approved visual doubt."
+            >
+              <input type="file" id="video_file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" hidden />
+              <span class="secondary-file-label">Source Video for Vision</span>
+              <span id="selected-video-file" class="secondary-file-value">Drop a video here or click to browse; frames are sent only when needed</span>
             </label>
             <section class="reference-tracks-card">
               <div class="reference-tracks-head">
@@ -182,6 +192,45 @@
                 <small>Carry scene, glossary, and character state across batches.</small>
               </span>
             </label>
+            <label
+              class="checkbox checkbox-card vision-toggle"
+              title="Allows one targeted visual follow-up per batch when the model reports a valid visual ambiguity. Requires a source video and a multimodal model."
+            >
+              <input type="checkbox" id="adaptive_vision" />
+              <span>
+                <strong>Use adaptive vision</strong>
+                <small>Ask for frames only for bounded doubts about speakers, objects, actions, locations, or on-screen text.</small>
+              </span>
+            </label>
+            <div id="vision-controls" class="vision-controls" hidden>
+              <div class="field-grid field-grid-controls">
+                <label>
+                  <span class="label-row">Max Doubts <span class="info-dot" title="Maximum doubtful subtitle lines combined into the single visual follow-up for a batch.">?</span></span>
+                  <select id="vision_max_doubts">
+                    <option value="1">1 line</option>
+                    <option value="2">2 lines</option>
+                    <option value="3" selected>3 lines</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="label-row">Max Frames <span class="info-dot" title="Maximum low-resolution frames attached to that one follow-up request. Nearby doubts share a frame.">?</span></span>
+                  <select id="vision_max_frames">
+                    <option value="1">1 frame</option>
+                    <option value="2" selected>2 frames</option>
+                    <option value="3">3 frames</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="label-row">Frame Size <span class="info-dot" title="Maximum image side in pixels. Smaller images reduce multimodal processing cost; 448 is a balanced default.">?</span></span>
+                  <select id="vision_frame_max_side">
+                    <option value="320">320 px</option>
+                    <option value="448" selected>448 px</option>
+                    <option value="640">640 px</option>
+                  </select>
+                </label>
+              </div>
+              <div id="vision-readiness" class="job-meta vision-readiness"></div>
+            </div>
             <div class="job-meta prompt-lab-summary">
               Prompt overrides, max output tokens, and request timeout now live in the dedicated Prompt Lab page.
             </div>
@@ -255,6 +304,23 @@
       </form>
     </dialog>
 
+    <dialog id="vision-evidence-dialog">
+      <form method="dialog" class="dialog-form vision-evidence-dialog-form">
+        <div class="panel-head">
+          <div>
+            <div class="mini-eyebrow">Visual Evidence</div>
+            <h2 id="vision-evidence-dialog-title">Frame Details</h2>
+          </div>
+          <div class="actions">
+            <button type="button" id="vision-evidence-prev" class="ghost">Previous</button>
+            <button type="button" id="vision-evidence-next" class="ghost">Next</button>
+            <button value="cancel" class="ghost">Close</button>
+          </div>
+        </div>
+        <div id="vision-evidence-dialog-body" class="vision-evidence-dialog-body"></div>
+      </form>
+    </dialog>
+
     <dialog id="log-dialog">
       <form method="dialog" class="dialog-form detail-dialog-form">
         <div class="panel-head">
@@ -298,6 +364,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260510-6"></script>
+    <script src="/static/app.js?v=20260624-11"></script>
   </body>
 </html>

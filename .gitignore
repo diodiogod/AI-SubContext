@@ -15,6 +15,9 @@ venv-win/
 
 # Runtime data and logs
 data/jobs.json
+data/videos/
+data/vision_cache/
+data/tmp*
 *.log
 subtitle_studio_setup.log
 
