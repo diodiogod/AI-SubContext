@@ -5,6 +5,19 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-25
+
+### Added
+
+- Translation jobs can prepare concise visual scene guides from ordered video frames before translating
+- Optional visual clarification now evaluates a concrete alternative instead of asking open-ended questions
+- Subtitle validation now detects text drifting into neighboring subtitle lines and automatically retries the batch
+- The interface shows clearer visual processing progress and evidence
+- Internal project guidance now documents the architecture and local testing workflow
+
+### Changed
+
+- Improve visual context and translation reliability
 ## [Unreleased]
 
 ### Added

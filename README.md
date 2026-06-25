@@ -4,10 +4,10 @@
 [![Stars](https://img.shields.io/github/stars/diodiogod/ai-subcontext?style=for-the-badge)](https://github.com/diodiogod/ai-subcontext/stargazers)
 [![Issues](https://img.shields.io/github/issues/diodiogod/ai-subcontext?style=for-the-badge)](https://github.com/diodiogod/ai-subcontext/issues)
 [![Forks](https://img.shields.io/github/forks/diodiogod/ai-subcontext?style=for-the-badge)](https://github.com/diodiogod/ai-subcontext/network/members)
-[![Version](https://img.shields.io/badge/version-0.2.6-1f6feb?style=for-the-badge)](https://github.com/diodiogod/ai-subcontext)
+[![Version](https://img.shields.io/badge/version-0.3.0-1f6feb?style=for-the-badge)](https://github.com/diodiogod/ai-subcontext)
 [![Ko-Fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/diogogo)
 
-# AI SubContext v0.2.6
+# AI SubContext v0.3.0
 
 Make quality subtitles with live context control using local models.
 
