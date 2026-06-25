@@ -58,8 +58,9 @@ Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using 
 - edit the main context card while a job is running
 - save, inspect, generate, and edit per-batch context snapshots
 - edit all translation and context prompts through Prompt Lab
-- optional adaptive vision with one bounded visual clarification request per batch
-- low-resolution video frames are extracted only when the model reports an approved speaker, object, action, location, or on-screen-text doubt
+- optional visual scene guides built from ordered frames before translation and attached only to overlapping subtitle batches
+- optional evidence-based clarification that requires two different translations before requesting a short frame sequence
+- visual revisions are checked again before replacing the provisional translation
 
 ### Review
 

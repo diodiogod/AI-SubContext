@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260624-4" />
+    <link rel="stylesheet" href="/static/app.css?v=20260624-5" />
   </head>
   <body>
     <main class="shell">
@@ -54,11 +54,11 @@
               id="video-file-picker"
               class="secondary-file"
               for="video_file"
-              title="Optional source video for adaptive visual clarification. Frames are extracted only when the model reports an approved visual doubt."
+              title="Optional source video for visual scene guides and evidence-based clarification."
             >
               <input type="file" id="video_file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" hidden />
               <span class="secondary-file-label">Source Video for Vision</span>
-              <span id="selected-video-file" class="secondary-file-value">Drop a video here or click to browse; frames are sent only when needed</span>
+              <span id="selected-video-file" class="secondary-file-value">Drop a video here or click to browse</span>
             </label>
             <section class="reference-tracks-card">
               <div class="reference-tracks-head">
@@ -192,42 +192,90 @@
                 <small>Carry scene, glossary, and character state across batches.</small>
               </span>
             </label>
-            <label
-              class="checkbox checkbox-card vision-toggle"
-              title="Allows one targeted visual follow-up per batch when the model reports a valid visual ambiguity. Requires a source video and a multimodal model."
-            >
-              <input type="checkbox" id="adaptive_vision" />
-              <span>
-                <strong>Use adaptive vision</strong>
-                <small>Ask for frames only for bounded doubts about speakers, objects, actions, locations, or on-screen text.</small>
-              </span>
-            </label>
+            <section class="vision-mode-section">
+              <div class="vision-mode-heading">
+                <div>
+                  <div class="mini-eyebrow">Visual Understanding</div>
+                  <p>Choose either approach independently, or combine them for an exploratory run.</p>
+                </div>
+              </div>
+              <div class="vision-mode-grid">
+                <label
+                  class="checkbox checkbox-card vision-toggle"
+                  title="Builds timestamped visual scene guides before translation and reuses them as factual context."
+                >
+                  <input type="checkbox" id="visual_scene_context" />
+                  <span>
+                    <strong>Prepare visual scene guides</strong>
+                    <small>Study ordered frames before translation, remember the previous visual scene, and give each batch a concise guide for its current scene.</small>
+                  </span>
+                </label>
+                <label
+                  class="checkbox checkbox-card vision-toggle"
+                  title="Allows a follow-up only when the translator supplies two different translations that visible evidence can choose between."
+                >
+                  <input type="checkbox" id="adaptive_vision" />
+                  <span>
+                    <strong>Resolve meaningful translation doubts</strong>
+                    <small>Ask for a short frame sequence only when vision can choose between the current translation and a concrete alternative.</small>
+                  </span>
+                </label>
+              </div>
+            </section>
             <div id="vision-controls" class="vision-controls" hidden>
-              <div class="field-grid field-grid-controls">
-                <label>
-                  <span class="label-row">Max Doubts <span class="info-dot" title="Maximum doubtful subtitle lines combined into the single visual follow-up for a batch.">?</span></span>
-                  <select id="vision_max_doubts">
-                    <option value="1">1 line</option>
-                    <option value="2">2 lines</option>
-                    <option value="3" selected>3 lines</option>
-                  </select>
-                </label>
-                <label>
-                  <span class="label-row">Max Frames <span class="info-dot" title="Maximum low-resolution frames attached to that one follow-up request. Nearby doubts share a frame.">?</span></span>
-                  <select id="vision_max_frames">
-                    <option value="1">1 frame</option>
-                    <option value="2" selected>2 frames</option>
-                    <option value="3">3 frames</option>
-                  </select>
-                </label>
-                <label>
-                  <span class="label-row">Frame Size <span class="info-dot" title="Maximum image side in pixels. Smaller images reduce multimodal processing cost; 448 is a balanced default.">?</span></span>
-                  <select id="vision_frame_max_side">
-                    <option value="320">320 px</option>
-                    <option value="448" selected>448 px</option>
-                    <option value="640">640 px</option>
-                  </select>
-                </label>
+              <div id="scene-vision-controls" class="vision-control-group" hidden>
+                <div class="mini-eyebrow">Scene Guide Preparation</div>
+                <div class="field-grid field-grid-controls">
+                  <label>
+                    <span class="label-row">Frames per Scene <span class="info-dot" title="Ordered frames sampled across each subtitle scene window. Four usually captures entry, action, reaction, and exit without excessive image cost.">?</span></span>
+                    <select id="visual_scene_frames">
+                      <option value="3">3 frames</option>
+                      <option value="4" selected>4 frames</option>
+                      <option value="5">5 frames</option>
+                      <option value="6">6 frames</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="label-row">Scene Frame Size <span class="info-dot" title="Maximum side for each scene frame. Scene understanding benefits from more detail than a single subtitle check.">?</span></span>
+                    <select id="visual_scene_frame_max_side">
+                      <option value="448">448 px</option>
+                      <option value="640" selected>640 px</option>
+                      <option value="768">768 px</option>
+                      <option value="1024">1024 px</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div id="adaptive-vision-controls" class="vision-control-group" hidden>
+                <div class="mini-eyebrow">Translation Doubt Resolution</div>
+                <div class="field-grid field-grid-controls">
+                  <label>
+                    <span class="label-row">Max Doubts <span class="info-dot" title="Maximum evidence-based alternatives checked in one batch. One is the conservative default.">?</span></span>
+                    <select id="vision_max_doubts">
+                      <option value="1" selected>1 line</option>
+                      <option value="2">2 lines</option>
+                      <option value="3">3 lines</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="label-row">Sequence Frames <span class="info-dot" title="Frames sampled before, during, and after the doubtful subtitle so the model sees a short sequence instead of one frozen moment.">?</span></span>
+                    <select id="vision_max_frames">
+                      <option value="2">2 frames</option>
+                      <option value="3">3 frames</option>
+                      <option value="4" selected>4 frames</option>
+                      <option value="5">5 frames</option>
+                      <option value="6">6 frames</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="label-row">Frame Size <span class="info-dot" title="Maximum image side in pixels. Smaller images reduce multimodal processing cost; 448 is a balanced default.">?</span></span>
+                    <select id="vision_frame_max_side">
+                      <option value="320">320 px</option>
+                      <option value="448" selected>448 px</option>
+                      <option value="640">640 px</option>
+                    </select>
+                  </label>
+                </div>
               </div>
               <div id="vision-readiness" class="job-meta vision-readiness"></div>
             </div>
@@ -364,6 +412,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260624-11"></script>
+    <script src="/static/app.js?v=20260624-12"></script>
   </body>
 </html>

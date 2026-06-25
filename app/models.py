@@ -70,6 +70,9 @@ class JobValidationStats(BaseModel):
 
 
 class JobVisionStats(BaseModel):
+    scene_cards_total: int = 0
+    scene_cards_created: int = 0
+    scene_context_failures: int = 0
     doubts_requested: int = 0
     doubts_approved: int = 0
     doubts_rejected: int = 0
@@ -83,6 +86,9 @@ class VisualDoubt(BaseModel):
     category: str
     question: str
     timestamp_hint: str = "middle"
+    current_translation: str = ""
+    alternative_translation: str = ""
+    translation_impact: str = ""
 
 
 class VisualObservation(BaseModel):
@@ -96,6 +102,8 @@ class VisualFrameLineDetail(BaseModel):
     position: int
     category: str
     question: str = ""
+    alternative_translation: str = ""
+    translation_impact: str = ""
     source_text: str = ""
     provisional_translation: str = ""
     final_translation: str = ""
@@ -114,6 +122,23 @@ class VisualFrameRecord(BaseModel):
     details: list[VisualFrameLineDetail] = Field(default_factory=list)
     status: str = "used"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class VisualSceneContext(BaseModel):
+    scene_index: int
+    start_position: int
+    end_position: int
+    start_time: str = ""
+    end_time: str = ""
+    setting: str = ""
+    visible_characters: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    objects: list[str] = Field(default_factory=list)
+    on_screen_text: list[str] = Field(default_factory=list)
+    speaker_evidence: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    summary: str = ""
+    frame_ids: list[str] = Field(default_factory=list)
 
 
 class SubtitleValidationIssue(BaseModel):
@@ -187,6 +212,7 @@ class TranslationJob(BaseModel):
     vision_stats: JobVisionStats = Field(default_factory=JobVisionStats)
     visual_observations: list[VisualObservation] = Field(default_factory=list)
     visual_frames: list[VisualFrameRecord] = Field(default_factory=list)
+    visual_scene_contexts: list[VisualSceneContext] = Field(default_factory=list)
     validation_issues: list[SubtitleValidationIssue] = Field(default_factory=list)
     pending_retranslations: list[QueuedLineRetranslation] = Field(default_factory=list)
     logs: list[JobLogEntry] = Field(default_factory=list)

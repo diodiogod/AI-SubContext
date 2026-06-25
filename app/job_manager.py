@@ -22,6 +22,7 @@ from app.models import (
     TranslationJob,
     VisualFrameRecord,
     VisualFrameLineDetail,
+    VisualSceneContext,
 )
 from app.srt_utils import (
     align_reference_track,
@@ -33,9 +34,11 @@ from app.srt_utils import (
 from app.translator import (
     OpenAICompatibleTranslator,
     TranslationStopRequested,
+    _line_looks_untranslated,
     _looks_like_unchanged_proper_name,
+    _validate_translated_batch,
 )
-from app.vision import VideoFrameProvider, validate_visual_doubts
+from app.vision import VideoFrameProvider, build_visual_scene_windows, validate_visual_doubts
 
 
 class DuplicateActiveJobError(RuntimeError):
@@ -188,6 +191,7 @@ class JobManager:
             doubts,
             batch_lines,
             max_doubts=job.settings.vision_max_doubts,
+            translated_lines=translated_lines,
         )
         job.vision_stats.doubts_approved += len(approved)
         job.vision_stats.doubts_rejected += len(rejected)
@@ -215,6 +219,27 @@ class JobManager:
             )
             if not frames:
                 raise RuntimeError("No usable frames were selected")
+            framed_positions = {
+                position for frame in frames for position in frame.related_positions
+            }
+            unframed = [
+                doubt for doubt in approved if doubt.position not in framed_positions
+            ]
+            if unframed:
+                job.vision_stats.doubts_approved -= len(unframed)
+                job.vision_stats.doubts_rejected += len(unframed)
+                approved = [
+                    doubt for doubt in approved if doubt.position in framed_positions
+                ]
+                self._append_log(
+                    job,
+                    "info",
+                    f"Rejected {len(unframed)} visual doubt(s) because no frame was selected for them",
+                    batch_index=batch_index,
+                    save=False,
+                )
+            if not approved:
+                return translated_lines
             job.vision_stats.clarification_requests += 1
             before = {line.position: line.text for line in translated_lines}
             self._record_visual_frames(
@@ -244,6 +269,59 @@ class JobManager:
                     batch_index=batch_index,
                 ),
             )
+            source_by_position = {line.position: line for line in batch_lines}
+            provisional_by_position = {line.position: line for line in translated_lines}
+            validated_lines: list[SubtitleLine] = []
+            rejected_revisions = 0
+            for line in revised_lines:
+                provisional = provisional_by_position.get(line.position, line)
+                source = source_by_position.get(line.position)
+                if source is None or line.text == provisional.text:
+                    validated_lines.append(line)
+                    continue
+                validation = _validate_translated_batch(
+                    job.settings,
+                    [source],
+                    [line],
+                    session_context,
+                )
+                untranslated = _line_looks_untranslated(
+                    source.text,
+                    line.text,
+                    session_context,
+                ) and not _looks_like_unchanged_proper_name(
+                    source.text,
+                    line.text,
+                    session_context,
+                )
+                unchanged_source = (
+                    " ".join(source.text.split()).strip().casefold()
+                    == " ".join(line.text.split()).strip().casefold()
+                    and not _looks_like_unchanged_proper_name(
+                        source.text,
+                        line.text,
+                        session_context,
+                    )
+                )
+                if (
+                    unchanged_source
+                    or untranslated
+                    or validation.failed
+                    or validation.suspicious_positions
+                ):
+                    validated_lines.append(provisional)
+                    rejected_revisions += 1
+                else:
+                    validated_lines.append(line)
+            revised_lines = validated_lines
+            if rejected_revisions:
+                self._append_log(
+                    job,
+                    "warn",
+                    f"Rejected {rejected_revisions} visual revision(s) that failed translation validation",
+                    batch_index=batch_index,
+                    save=False,
+                )
             revised_count = sum(
                 1
                 for line in revised_lines
@@ -302,6 +380,112 @@ class JobManager:
             )
             return translated_lines
 
+    def _visual_contexts_for_lines(
+        self,
+        job: TranslationJob,
+        batch_lines: list[SubtitleLine],
+    ) -> list[VisualSceneContext]:
+        if not batch_lines or not job.visual_scene_contexts:
+            return []
+        start_position = batch_lines[0].position
+        end_position = batch_lines[-1].position
+        return [
+            context
+            for context in job.visual_scene_contexts
+            if context.end_position >= start_position
+            and context.start_position <= end_position
+        ]
+
+    async def _build_visual_scene_contexts(self, job: TranslationJob) -> None:
+        scenes = build_visual_scene_windows(job.original_lines)
+        if not scenes:
+            return
+        self._append_log(
+            job,
+            "info",
+            f"Building visual scene context from {len(scenes)} scene window(s)",
+            save=False,
+        )
+        job.vision_stats.scene_cards_total = len(scenes)
+        completed = {item.scene_index: item for item in job.visual_scene_contexts}
+        previous_scene: VisualSceneContext | None = None
+        for scene in scenes:
+            if job.stop_requested:
+                raise TranslationStopRequested("Translation stopped by user")
+            if job.pause_requested and job.visual_scene_contexts:
+                break
+            if scene.scene_index in completed:
+                previous_scene = completed[scene.scene_index]
+                continue
+            try:
+                job.message = f"Preparing visual scene guide {scene.scene_index}/{len(scenes)}"
+                frames = await self.vision.extract_for_scene(
+                    job.id,
+                    job.video_path,
+                    scene,
+                    frame_count=job.settings.visual_scene_frames,
+                    max_side=job.settings.visual_scene_frame_max_side,
+                )
+                for frame in frames:
+                    existing = {item.id: item for item in job.visual_frames}
+                    existing[frame.id] = VisualFrameRecord(
+                        id=frame.id,
+                        batch_index=scene.scene_index,
+                        timestamp_ms=frame.timestamp_ms,
+                        related_positions=list(frame.related_positions),
+                        categories=["scene_context"],
+                        status="pending",
+                    )
+                    job.visual_frames = sorted(
+                        existing.values(),
+                        key=lambda item: (item.timestamp_ms, item.batch_index),
+                    )[-240:]
+                self._save_state()
+                context = await self.translator.analyze_visual_scene(
+                    job.settings,
+                    scene.scene_index,
+                    scene.lines,
+                    job.session_context,
+                    previous_scene,
+                    frames,
+                    log_event=lambda level, message, scene_no=scene.scene_index: self._append_log(
+                        job,
+                        level,
+                        message,
+                        batch_index=None,
+                    ),
+                )
+                job.visual_scene_contexts.append(context)
+                job.visual_scene_contexts.sort(key=lambda item: item.scene_index)
+                for frame in job.visual_frames:
+                    if frame.id in context.frame_ids:
+                        frame.status = "scene"
+                job.vision_stats.scene_cards_created += 1
+                previous_scene = context
+                job.message = f"Prepared visual scene guide {scene.scene_index}/{len(scenes)}"
+                self._append_log(
+                    job,
+                    "info",
+                    f"Visual scene {scene.scene_index}/{len(scenes)} ready",
+                    save=False,
+                )
+                self._save_state()
+            except TranslationStopRequested:
+                raise
+            except Exception as exc:
+                job.vision_stats.scene_context_failures += 1
+                for frame in job.visual_frames:
+                    if frame.batch_index == scene.scene_index and frame.status == "pending":
+                        frame.status = "failed"
+                self._append_log(
+                    job,
+                    "warn",
+                    f"Visual scene {scene.scene_index} failed and will be skipped: {exc}",
+                    save=False,
+                )
+                self._save_state()
+        job.message = f"Visual scene guides ready: {len(job.visual_scene_contexts)}/{len(scenes)}"
+
     def _record_visual_frames(
         self,
         job: TranslationJob,
@@ -339,6 +523,8 @@ class JobManager:
                         position=position,
                         category=doubt.category,
                         question=doubt.question,
+                        alternative_translation=doubt.alternative_translation,
+                        translation_impact=doubt.translation_impact,
                         source_text=source_by_position.get(position, ""),
                         provisional_translation=provisional_by_position.get(position, ""),
                         final_translation=final_by_position.get(position, ""),
@@ -955,7 +1141,17 @@ class JobManager:
                     save=False,
                 )
         if video_path:
-            self._append_log(job, "info", f"Adaptive vision video loaded: {video_filename}", save=False)
+            modes = []
+            if settings.visual_scene_context:
+                modes.append("visual scene context")
+            if settings.adaptive_vision:
+                modes.append("adaptive clarification")
+            self._append_log(
+                job,
+                "info",
+                f"Vision video loaded for {', '.join(modes)}: {video_filename}",
+                save=False,
+            )
         self.jobs[job.id] = job
         self._save_state()
         self._start_task(job.id)
@@ -1180,6 +1376,25 @@ class JobManager:
                 self._append_log(job, "info", "Initial context card ready", save=False)
                 self._save_state()
 
+            if (
+                job.settings.visual_scene_context
+                and job.video_path
+            ):
+                await self._build_visual_scene_contexts(job)
+                if job.pause_requested:
+                    job.pause_requested = False
+                    job.status = JobStatus.PAUSED
+                    job.estimated_completion_at = None
+                    job.message = "Paused after visual scene guide"
+                    self._append_log(
+                        job,
+                        "info",
+                        "Paused after visual scene guide",
+                        save=False,
+                    )
+                    self._save_state()
+                    return
+
             translated_by_position = {line.position: line for line in job.translated_lines}
 
             for batch_index in range(job.current_batch, len(batches)):
@@ -1207,6 +1422,10 @@ class JobManager:
                     batches[batch_index],
                     current_context,
                     reference_subtitles_by_position=self._reference_payload_for_positions(job, batch_positions),
+                    visual_scene_contexts=self._visual_contexts_for_lines(
+                        job,
+                        batches[batch_index],
+                    ),
                     batch_index=batch_index + 1,
                     should_stop=lambda active_job=job: bool(active_job.stop_requested),
                     log_event=lambda level, message, batch_no=batch_index + 1: self._append_log(

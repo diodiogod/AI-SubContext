@@ -59,7 +59,10 @@ const initialCardStrategyInput = document.getElementById("initial_card_strategy"
 const initialCardMaxCharsInput = document.getElementById("initial_card_max_chars");
 const initialCardEstimate = document.getElementById("initial-card-estimate");
 const adaptiveVisionInput = document.getElementById("adaptive_vision");
+const visualSceneContextInput = document.getElementById("visual_scene_context");
 const visionControls = document.getElementById("vision-controls");
+const sceneVisionControls = document.getElementById("scene-vision-controls");
+const adaptiveVisionControls = document.getElementById("adaptive-vision-controls");
 const visionReadiness = document.getElementById("vision-readiness");
 const resetPromptLabBtn = document.getElementById("reset-prompt-lab-btn");
 const consoleTabButtons = [...document.querySelectorAll("[data-console-tab]")];
@@ -219,10 +222,11 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
       <div class="vision-timeline-head">
         <div>
           <div class="mini-eyebrow">Visual Evidence</div>
-          <div class="job-meta">${escapeHtml(String(frames.length))} frame${frames.length === 1 ? "" : "s"} collected only when requested</div>
+          <div class="job-meta">${escapeHtml(String(frames.length))} frame${frames.length === 1 ? "" : "s"} collected for scene guides and targeted evidence</div>
         </div>
         <div class="vision-timeline-stats">
           <span title="Calls: number of batches that triggered one multimodal follow-up request with screenshots.">Calls ${escapeHtml(String(stats.clarification_requests || 0))}</span>
+          ${stats.scene_cards_total ? `<span title="Timestamped visual scene guides prepared before translation.">Scene guides ${escapeHtml(String(stats.scene_cards_created || 0))}/${escapeHtml(String(stats.scene_cards_total))}</span>` : ""}
           <span title="Approved: model-reported visual doubts that passed the app's category, line, question, and per-batch limit checks.">Approved ${escapeHtml(String(stats.doubts_approved || 0))}</span>
           <span title="Revised: subtitle lines whose provisional translation was changed after the model inspected the requested screenshots.">Revised ${escapeHtml(String(stats.lines_revised || 0))}</span>
           ${stats.clarification_failures ? `<span class="failed">Failed ${escapeHtml(String(stats.clarification_failures))}</span>` : ""}
@@ -242,16 +246,24 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
           const positions = Array.isArray(frame.related_positions) ? frame.related_positions : [];
           const categories = Array.isArray(frame.categories) ? frame.categories : [];
           const revised = Array.isArray(frame.revised_positions) ? frame.revised_positions : [];
+          const isSceneFrame = frame.status === "scene"
+            || (Array.isArray(frame.categories) && frame.categories.includes("scene_context"))
+            || frameId.startsWith("b-");
+          const positionLabel = positions.length
+            ? (isSceneFrame
+              ? `Lines ${Number(positions[0]) + 1}-${Number(positions[positions.length - 1]) + 1}`
+              : `Lines ${positions.map(position => Number(position) + 1).join(", ")}`)
+            : "";
           const title = [
-            `Batch ${frame.batch_index || "?"}`,
+            isSceneFrame ? `Scene ${frame.batch_index || "?"}` : `Batch ${frame.batch_index || "?"}`,
             `Time ${formatMediaTime(frame.timestamp_ms)}`,
-            positions.length ? `Lines ${positions.map(position => Number(position) + 1).join(", ")}` : "",
+            positionLabel,
             categories.length ? categories.join(", ") : "",
           ].filter(Boolean).join(" · ");
           return `
             <button
               type="button"
-              class="vision-frame ${frame.status === "failed" ? "failed" : ""} ${frame.status === "pending" ? "pending" : ""} ${revised.length ? "revised" : ""} ${frameId === newestId ? "latest" : ""} ${isNew ? "is-new" : ""}"
+              class="vision-frame ${frame.status === "failed" ? "failed" : ""} ${frame.status === "pending" ? "pending" : ""} ${isSceneFrame ? "scene-frame" : ""} ${revised.length ? "revised" : ""} ${frameId === newestId ? "latest" : ""} ${isNew ? "is-new" : ""}"
               style="--frame-shrink:${cappedAge * 6}px;--frame-opacity:${frameOpacity}"
               data-vision-frame="${escapeHtml(frameId)}"
               data-vision-job="${escapeHtml(job.id)}"
@@ -260,7 +272,7 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
               <img src="/api/jobs/${encodeURIComponent(job.id)}/vision/frames/${encodeURIComponent(frameId)}" alt="Visual evidence at ${escapeHtml(formatMediaTime(frame.timestamp_ms))}" loading="lazy" />
               <span class="vision-frame-shade"></span>
               <span class="vision-frame-time">${escapeHtml(formatMediaTime(frame.timestamp_ms))}</span>
-              <span class="vision-frame-batch">B${escapeHtml(String(frame.batch_index || "?"))}</span>
+              <span class="vision-frame-batch">${isSceneFrame ? "SCENE" : `B${escapeHtml(String(frame.batch_index || "?"))}`}</span>
               ${frame.status === "pending" ? `<span class="vision-frame-pending">analyzing</span>` : ""}
               ${revised.length ? `<span class="vision-frame-result">revised</span>` : ""}
             </button>
@@ -276,6 +288,12 @@ function openVisionEvidence(jobId, frameId) {
   const frame = (job?.visual_frames || []).find(item => String(item.id) === String(frameId));
   if (!job || !frame || !visionEvidenceDialog || !visionEvidenceDialogBody) return;
   const details = Array.isArray(frame.details) ? frame.details : [];
+  const isSceneFrame = frame.status === "scene"
+    || (Array.isArray(frame.categories) && frame.categories.includes("scene_context"))
+    || String(frame.id || "").startsWith("b-");
+  const sceneGuide = (job.visual_scene_contexts || []).find(
+    item => Array.isArray(item.frame_ids) && item.frame_ids.includes(frameId)
+  );
   const imageUrl = `/api/jobs/${encodeURIComponent(jobId)}/vision/frames/${encodeURIComponent(frameId)}`;
   const orderedFrames = [...(job.visual_frames || [])].sort((a, b) => {
     const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
@@ -294,7 +312,7 @@ function openVisionEvidence(jobId, frameId) {
       ? "This is the latest visual frame."
       : "Open the next visual frame.";
   }
-  visionEvidenceDialogTitle.textContent = `Batch ${frame.batch_index || "?"} · ${formatMediaTime(frame.timestamp_ms)}`;
+  visionEvidenceDialogTitle.textContent = `${sceneGuide ? `Scene ${sceneGuide.scene_index || "?"}` : `Batch ${frame.batch_index || "?"}`} · ${formatMediaTime(frame.timestamp_ms)}`;
   visionEvidenceDialogBody.innerHTML = `
     <div class="vision-evidence-layout">
       <figure class="vision-evidence-image">
@@ -308,10 +326,27 @@ function openVisionEvidence(jobId, frameId) {
         <div class="job-facts">
           <span class="job-fact">Batch ${escapeHtml(String(frame.batch_index || "?"))}</span>
           <span class="job-fact">Time ${escapeHtml(formatMediaTime(frame.timestamp_ms))}</span>
-          <span class="job-fact">${escapeHtml(String(details.length))} doubt${details.length === 1 ? "" : "s"}</span>
-          <span class="job-fact">${escapeHtml(String((frame.revised_positions || []).length))} revised</span>
+          ${sceneGuide
+            ? `<span class="job-fact">Lines ${escapeHtml(String(Number(sceneGuide.start_position || 0) + 1))}-${escapeHtml(String(Number(sceneGuide.end_position || 0) + 1))}</span>`
+            : `<span class="job-fact">${escapeHtml(String(details.length))} doubt${details.length === 1 ? "" : "s"}</span>
+               <span class="job-fact">${escapeHtml(String((frame.revised_positions || []).length))} revised</span>`}
         </div>
-        ${details.length ? details.map(detail => `
+        ${sceneGuide ? `
+          <article class="vision-evidence-detail scene-guide-detail">
+            <div class="vision-evidence-detail-head">
+              <span class="log-badge info">scene guide</span>
+              <span class="log-batch">Scene ${escapeHtml(String(sceneGuide.scene_index || "?"))}</span>
+            </div>
+            <div class="vision-evidence-field">
+              <span>Visual summary</span>
+              <strong>${escapeHtml(sceneGuide.summary || "No summary returned.")}</strong>
+            </div>
+            ${sceneGuide.setting ? `<div class="vision-evidence-field"><span>Setting</span><strong>${escapeHtml(sceneGuide.setting)}</strong></div>` : ""}
+            ${(sceneGuide.visible_characters || []).length ? `<div class="vision-evidence-field"><span>Visible people</span><strong>${escapeHtml(sceneGuide.visible_characters.join(" · "))}</strong></div>` : ""}
+            ${(sceneGuide.actions || []).length ? `<div class="vision-evidence-field"><span>Visible actions</span><strong>${escapeHtml(sceneGuide.actions.join(" · "))}</strong></div>` : ""}
+            ${(sceneGuide.uncertainties || []).length ? `<div class="vision-evidence-field"><span>Still uncertain</span><strong>${escapeHtml(sceneGuide.uncertainties.join(" · "))}</strong></div>` : ""}
+          </article>
+        ` : details.length ? details.map(detail => `
           <article class="vision-evidence-detail ${detail.revised ? "revised" : ""}">
             <div class="vision-evidence-detail-head">
               <span class="log-badge info">${escapeHtml(detail.category || "visual")}</span>
@@ -326,6 +361,18 @@ function openVisionEvidence(jobId, frameId) {
               <span>Model doubt</span>
               <strong>${escapeHtml(detail.question || "Question was not recorded for this older frame.")}</strong>
             </div>
+            ${detail.alternative_translation ? `
+              <div class="vision-evidence-field">
+                <span>Alternative considered</span>
+                <strong>${escapeHtml(detail.alternative_translation)}</strong>
+              </div>
+            ` : ""}
+            ${detail.translation_impact ? `
+              <div class="vision-evidence-field">
+                <span>Why vision mattered</span>
+                <strong>${escapeHtml(detail.translation_impact)}</strong>
+              </div>
+            ` : ""}
             <div class="vision-evidence-field">
               <span>Visual response</span>
               <strong>${escapeHtml(detail.answer || (frame.status === "pending" ? "The visual request is still running." : "No visual answer was returned."))}</strong>
@@ -341,7 +388,13 @@ function openVisionEvidence(jobId, frameId) {
               </div>
             </div>
           </article>
-        `).join("") : `
+        `).join("") : isSceneFrame ? `
+          <p class="job-meta">${
+            frame.status === "pending"
+              ? "This frame sequence is being analyzed for a visual scene guide."
+              : "The visual scene guide was not available for this frame."
+          }</p>
+        ` : `
           <p class="job-meta">This frame was recorded before detailed visual evidence history was added.</p>
         `}
       </section>
@@ -886,31 +939,41 @@ function updateSelectedVideoFileLabel() {
   if (selectedVideoFile) {
     selectedVideoFile.textContent = file
       ? file.name
-      : "Drop a video here or click to browse; frames are sent only when needed";
+      : "Drop a video here or click to browse";
   }
   updateVisionControls();
 }
 
 function acceptSelectedVideo() {
   const file = videoFileInput?.files && videoFileInput.files[0];
-  if (file && adaptiveVisionInput) {
-    adaptiveVisionInput.checked = true;
+  if (file && visualSceneContextInput && adaptiveVisionInput) {
+    if (!visualSceneContextInput.checked && !adaptiveVisionInput.checked) {
+      visualSceneContextInput.checked = true;
+    }
     saveSettings();
   }
   updateSelectedVideoFileLabel();
 }
 
 function updateVisionControls() {
-  const enabled = Boolean(adaptiveVisionInput?.checked);
+  const sceneEnabled = Boolean(visualSceneContextInput?.checked);
+  const adaptiveEnabled = Boolean(adaptiveVisionInput?.checked);
+  const enabled = sceneEnabled || adaptiveEnabled;
   if (visionControls) visionControls.hidden = !enabled;
+  if (sceneVisionControls) sceneVisionControls.hidden = !sceneEnabled;
+  if (adaptiveVisionControls) adaptiveVisionControls.hidden = !adaptiveEnabled;
   if (!visionReadiness) return;
   const video = videoFileInput?.files && videoFileInput.files[0];
   if (!enabled) {
     visionReadiness.textContent = "";
   } else if (!video) {
-    visionReadiness.textContent = "Select a source video. Adaptive vision cannot start without it.";
+    visionReadiness.textContent = "Select a source video to use the visual features.";
   } else {
-    visionReadiness.textContent = `${video.name} ready. At most one visual follow-up will be allowed per batch.`;
+    const modes = [
+      sceneEnabled ? "scene guides before translation" : "",
+      adaptiveEnabled ? "evidence-based doubt resolution during translation" : "",
+    ].filter(Boolean);
+    visionReadiness.textContent = `${video.name} ready for ${modes.join(" and ")}.`;
   }
 }
 
@@ -1995,7 +2058,9 @@ function renderJobs(jobs) {
         : "Show verbose runtime events, retries, and validation decisions.";
       const validation = job.validation_stats || {};
       const vision = job.vision_stats || {};
-      const visionEnabled = Boolean(job?.settings?.adaptive_vision);
+      const adaptiveVisionEnabled = Boolean(job?.settings?.adaptive_vision);
+      const sceneVisionEnabled = Boolean(job?.settings?.visual_scene_context);
+      const visionEnabled = adaptiveVisionEnabled || sceneVisionEnabled;
       const issueCount = Array.isArray(job.validation_issues) ? job.validation_issues.length : 0;
       const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
       const canResume = job.status === "paused" || job.status === "failed";
@@ -2022,7 +2087,9 @@ function renderJobs(jobs) {
             <span class="job-fact">${sourceLanguage} → ${targetLanguage}</span>
             <span class="job-fact">${model}</span>
             ${referenceLanguages.length ? `<span class="job-fact">Refs ${escapeHtml(referenceLanguages.join(", "))}</span>` : ""}
-            ${visionEnabled ? `<span class="job-fact">Vision adaptive</span>` : ""}
+            ${sceneVisionEnabled ? `<span class="job-fact">Visual scene guides</span>` : ""}
+            ${adaptiveVisionEnabled ? `<span class="job-fact">Vision doubt checks</span>` : ""}
+            ${vision.scene_cards_total ? `<span class="job-fact">Scene guides ${escapeHtml(String(vision.scene_cards_created || 0))}/${escapeHtml(String(vision.scene_cards_total))}</span>` : ""}
             ${vision.clarification_requests ? `<span class="job-fact">Vision calls ${escapeHtml(String(vision.clarification_requests))}</span>` : ""}
             ${vision.lines_revised ? `<span class="job-fact">Vision revised ${escapeHtml(String(vision.lines_revised))}</span>` : ""}
             ${vision.clarification_failures ? `<span class="job-fact">Vision failed ${escapeHtml(String(vision.clarification_failures))}</span>` : ""}
@@ -2079,7 +2146,9 @@ function renderLogDialog(job, options = {}) {
   const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
   const visualObservations = Array.isArray(job.visual_observations) ? job.visual_observations : [];
   const visionStats = job.vision_stats || {};
-  const visionEnabled = Boolean(job?.settings?.adaptive_vision);
+  const adaptiveVisionEnabled = Boolean(job?.settings?.adaptive_vision);
+  const sceneVisionEnabled = Boolean(job?.settings?.visual_scene_context);
+  const visionEnabled = adaptiveVisionEnabled || sceneVisionEnabled;
   const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
   const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
   const latestLogs = [...logs].reverse();
@@ -2098,7 +2167,7 @@ function renderLogDialog(job, options = {}) {
     <div class="log-tabs" role="tablist" aria-label="Log sections">
       <button type="button" class="log-tab ${activeTab === "events" ? "active" : ""}" data-log-tab="events">Events ${escapeHtml(String(logs.length))}</button>
       <button type="button" class="log-tab ${activeTab === "references" ? "active" : ""}" data-log-tab="references" ${referenceTracks.length ? "" : "disabled"}>References ${escapeHtml(String(referenceTracks.length))}</button>
-      <button type="button" class="log-tab ${activeTab === "vision" ? "active" : ""}" data-log-tab="vision" ${visionEnabled ? "" : "disabled"}>Vision ${escapeHtml(String(visualObservations.length))}</button>
+      <button type="button" class="log-tab ${activeTab === "vision" ? "active" : ""}" data-log-tab="vision" ${visionEnabled ? "" : "disabled"}>Vision ${escapeHtml(String(visualObservations.length + (job.visual_scene_contexts || []).length))}</button>
       <button type="button" class="log-tab ${activeTab === "issues" ? "active" : ""}" data-log-tab="issues" ${issueCount ? "" : "disabled"}>Issues ${escapeHtml(String(issueCount))}</button>
       <span class="log-follow-state">${preserveScroll && !wasNearTop ? "Reading position locked" : "Following newest"}</span>
     </div>
@@ -2172,11 +2241,15 @@ function renderLogDialog(job, options = {}) {
     </section>
     <section class="log-tab-panel ${activeTab === "vision" ? "active" : ""}" data-log-panel="vision">
       ${visionEnabled ? `
-        <div class="mini-eyebrow">Adaptive Vision</div>
+        <div class="mini-eyebrow">Visual Understanding</div>
         <p class="job-meta">
-          ${escapeHtml(job.video_filename || "Source video loaded")}. One combined visual follow-up is permitted per batch.
+          ${escapeHtml(job.video_filename || "Source video loaded")}.
+          ${sceneVisionEnabled ? "Scene guides are prepared before translation." : ""}
+          ${adaptiveVisionEnabled ? "Translation doubts require a concrete alternative before frames are requested." : ""}
         </p>
         <div class="job-facts">
+          ${sceneVisionEnabled ? `<span class="job-fact">Scene guides ${escapeHtml(String(visionStats.scene_cards_created || 0))}/${escapeHtml(String(visionStats.scene_cards_total || "?"))}</span>` : ""}
+          ${visionStats.scene_context_failures ? `<span class="job-fact">Scene failures ${escapeHtml(String(visionStats.scene_context_failures))}</span>` : ""}
           <span class="job-fact">Requested ${escapeHtml(String(visionStats.doubts_requested || 0))}</span>
           <span class="job-fact" title="Model-reported visual doubts that passed the app's validation and per-batch limits.">Approved ${escapeHtml(String(visionStats.doubts_approved || 0))}</span>
           <span class="job-fact">Rejected ${escapeHtml(String(visionStats.doubts_rejected || 0))}</span>
@@ -2185,6 +2258,20 @@ function renderLogDialog(job, options = {}) {
           <span class="job-fact">Failed ${escapeHtml(String(visionStats.clarification_failures || 0))}</span>
         </div>
         ${renderVisionTimeline(job, false, "log")}
+        ${(job.visual_scene_contexts || []).length ? `
+          <div class="issue-list">
+            ${[...(job.visual_scene_contexts || [])].reverse().map(scene => `
+              <article class="issue-entry">
+                <div class="issue-entry-head">
+                  <span class="log-badge info">scene ${escapeHtml(String(scene.scene_index || "?"))}</span>
+                  <span class="log-batch">Lines ${escapeHtml(String(Number(scene.start_position || 0) + 1))}-${escapeHtml(String(Number(scene.end_position || 0) + 1))}</span>
+                  <span class="log-time">${escapeHtml(scene.start_time || "")}</span>
+                </div>
+                <div class="issue-copy">${escapeHtml(scene.summary || scene.setting || "Visual scene guide ready.")}</div>
+              </article>
+            `).join("")}
+          </div>
+        ` : ""}
         ${visualObservations.length ? `
           <div class="issue-list">
             ${[...visualObservations].reverse().map(observation => `
@@ -2607,8 +2694,11 @@ async function createJob(event) {
   const file = fileInput.files[0];
   if (!file) return;
   const videoFile = videoFileInput?.files && videoFileInput.files[0];
-  if (adaptiveVisionInput?.checked && !videoFile) {
-    alert("Select a source video or turn off adaptive vision.");
+  const visionEnabled = Boolean(
+    adaptiveVisionInput?.checked || visualSceneContextInput?.checked
+  );
+  if (visionEnabled && !videoFile) {
+    alert("Select a source video or turn off the visual features.");
     return;
   }
   const submitButton = form.querySelector('button[type="submit"]');
@@ -2619,7 +2709,7 @@ async function createJob(event) {
     submitButton.textContent = "Creating Job...";
   }
   data.append("file", file);
-  if (adaptiveVisionInput?.checked && videoFile) data.append("video_file", videoFile);
+  if (visionEnabled && videoFile) data.append("video_file", videoFile);
   for (const track of referenceTracks) {
     data.append("reference_languages", track.language);
     data.append("reference_files", track.file);
@@ -3321,6 +3411,10 @@ document.addEventListener("keydown", (event) => {
   }
 });
 adaptiveVisionInput?.addEventListener("change", () => {
+  saveSettings();
+  updateVisionControls();
+});
+visualSceneContextInput?.addEventListener("change", () => {
   saveSettings();
   updateVisionControls();
 });

@@ -26,6 +26,7 @@ from app.models import (
     SubtitleValidationIssue,
     VisualDoubt,
     VisualObservation,
+    VisualSceneContext,
 )
 from app.srt_utils import chunk_lines
 from app.vision import ExtractedVisualFrame
@@ -44,7 +45,9 @@ _LANGUAGE_DETECTOR_FAILED = False
 _STRICT_RETRY_INSTRUCTION = (
     "Validation warning: previous output may have left lines untranslated or in the source language. "
     "Translate every line fully into the target language. Do not keep source-language text unless it is a proper name "
-    "or a term explicitly marked to keep in the context glossary. Preserve line order and return all positions."
+    "or a term explicitly marked to keep in the context glossary. Preserve line order and return all positions. "
+    "Each output line must translate only its matching source line. Never pull text from adjacent subtitle lines, "
+    "even when a sentence spans multiple subtitles."
 )
 
 _LANGUAGE_ALIASES = {
@@ -75,6 +78,11 @@ DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
     "The primary subtitle text is always the canonical source. "
     "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
     "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
+    "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
+    "forward or backward across positions, even if the sentence continues across multiple subtitles. "
+    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible. "
+    "If visual_scene_context is present, treat it as cached factual evidence from ordered video frames for the current scene. "
+    "Use it only when relevant, preserve its stated uncertainties, and prefer the canonical subtitle text when they conflict. "
     "For state_update: premise means the whole movie premise (global story setup), not a scene recap. "
     "Keep premise stable across batches, but correct it when new evidence clearly contradicts earlier assumptions. "
     "You may revise any state_update field when current lines provide stronger evidence that earlier context was wrong. "
@@ -86,9 +94,13 @@ DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
 
 ADAPTIVE_VISION_TRANSLATION_INSTRUCTION = (
     "You may flag up to {max_doubts} lines for one visual follow-up. "
-    "Flag only a concrete ambiguity an image can answer, using category speaker_gender, speaker_identity, "
+    "Flag only a concrete ambiguity that would materially change the target-language subtitle and that images can answer, "
+    "using category speaker_gender, speaker_identity, "
     "object_identity, visible_action, location_context, or on_screen_text and timestamp_hint start, middle, or end. "
-    "Do not flag ordinary vocabulary, grammar, general uncertainty, or prior-scene questions. "
+    "For every doubt, provide current_translation, one meaningfully different alternative_translation, and a concise "
+    "translation_impact explaining why the visual answer selects between them. "
+    "Do not flag ordinary vocabulary, grammar, general uncertainty, story curiosity, or prior-scene questions. "
+    "Do not flag a line when the uncertainty would leave the translation unchanged. "
     "Keep every provisional translation usable and do not put an unconfirmed visual assumption in state_update."
 )
 
@@ -642,12 +654,23 @@ def _adaptive_translation_schema() -> dict[str, Any]:
                     ],
                 },
                 "question": {"type": "string", "minLength": 12, "maxLength": 220},
+                "current_translation": {"type": "string", "minLength": 1, "maxLength": 500},
+                "alternative_translation": {"type": "string", "minLength": 1, "maxLength": 500},
+                "translation_impact": {"type": "string", "minLength": 12, "maxLength": 220},
                 "timestamp_hint": {
                     "type": "string",
                     "enum": ["start", "middle", "end"],
                 },
             },
-            "required": ["position", "category", "question", "timestamp_hint"],
+            "required": [
+                "position",
+                "category",
+                "question",
+                "current_translation",
+                "alternative_translation",
+                "translation_impact",
+                "timestamp_hint",
+            ],
         },
     }
     schema["required"].append("visual_doubts")
@@ -659,7 +682,7 @@ def _visual_clarification_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "revisions": {
+            "decisions": {
                 "type": "array",
                 "maxItems": 3,
                 "items": {
@@ -667,41 +690,60 @@ def _visual_clarification_schema() -> dict[str, Any]:
                     "additionalProperties": False,
                     "properties": {
                         "position": {"type": "integer"},
-                        "text": {"type": "string", "maxLength": 500},
-                    },
-                    "required": ["position", "text"],
-                },
-            },
-            "observations": {
-                "type": "array",
-                "maxItems": 3,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "position": {"type": "integer"},
-                        "category": {
+                        "selected": {
                             "type": "string",
-                            "enum": [
-                                "speaker_gender",
-                                "speaker_identity",
-                                "object_identity",
-                                "visible_action",
-                                "location_context",
-                                "on_screen_text",
-                            ],
+                            "enum": ["current", "alternative", "inconclusive"],
                         },
+                        "evidence_found": {"type": "boolean"},
                         "answer": {"type": "string", "maxLength": 240},
                         "confidence": {
                             "type": "string",
                             "enum": ["high", "medium", "low", "unknown"],
                         },
                     },
-                    "required": ["position", "category", "answer", "confidence"],
+                    "required": [
+                        "position",
+                        "selected",
+                        "evidence_found",
+                        "answer",
+                        "confidence",
+                    ],
                 },
             },
         },
-        "required": ["revisions", "observations"],
+        "required": ["decisions"],
+    }
+
+
+def _visual_scene_context_schema() -> dict[str, Any]:
+    list_field = {
+        "type": "array",
+        "maxItems": 10,
+        "items": {"type": "string", "maxLength": 180},
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "setting": {"type": "string", "maxLength": 240},
+            "visible_characters": list_field,
+            "actions": list_field,
+            "objects": list_field,
+            "on_screen_text": list_field,
+            "speaker_evidence": list_field,
+            "uncertainties": list_field,
+            "summary": {"type": "string", "maxLength": 500},
+        },
+        "required": [
+            "setting",
+            "visible_characters",
+            "actions",
+            "objects",
+            "on_screen_text",
+            "speaker_evidence",
+            "uncertainties",
+            "summary",
+        ],
     }
 
 
@@ -869,6 +911,44 @@ def _line_looks_untranslated(
     return overlap >= 0.82
 
 
+def _line_boundary_markers(text: str) -> dict[str, bool]:
+    stripped = text.strip()
+    if not stripped:
+        return {
+            "leading_dash": False,
+            "starts_with_quote": False,
+            "ends_with_quote": False,
+            "ends_with_ellipsis": False,
+        }
+
+    quote_chars = "\"'“”‘’«»"
+    return {
+        "leading_dash": stripped.startswith(("-", "–", "—")),
+        "starts_with_quote": stripped[:1] in quote_chars,
+        "ends_with_quote": stripped[-1:] in quote_chars,
+        "ends_with_ellipsis": stripped.endswith(("...", "…")),
+    }
+
+
+def _boundary_drift_positions(
+    batch_lines: list[SubtitleLine],
+    translated_lines: list[SubtitleLine],
+) -> list[int]:
+    flagged: set[int] = set()
+    for source, translated in zip(batch_lines, translated_lines, strict=False):
+        source_markers = _line_boundary_markers(source.text)
+        translated_markers = _line_boundary_markers(translated.text)
+        core_mismatches = sum(
+            1
+            for key in ("leading_dash", "starts_with_quote", "ends_with_quote")
+            if source_markers[key] != translated_markers[key]
+        )
+        soft_mismatch = source_markers["ends_with_ellipsis"] != translated_markers["ends_with_ellipsis"]
+        if core_mismatches >= 1 or (core_mismatches == 0 and soft_mismatch):
+            flagged.add(source.position)
+    return sorted(flagged)
+
+
 def _line_has_strong_failure_signal(
     settings: TranslationSettings,
     source_text: str,
@@ -945,11 +1025,13 @@ def _validate_translated_batch(
     if not source_code or not target_code or source_code == target_code:
         return BatchValidationResult(False, [], None, "")
 
-    suspicious_positions = [
+    untranslated_positions = [
         source.position
         for source, translated in zip(batch_lines, translated_lines, strict=False)
         if _line_looks_untranslated(source.text, translated.text, session_context)
     ]
+    boundary_positions = _boundary_drift_positions(batch_lines, translated_lines)
+    suspicious_positions = sorted(set(untranslated_positions) | set(boundary_positions))
     translated_batch_text = " ".join(
         translated.text for translated in translated_lines if _alpha_character_count(translated.text) >= 4
     )
@@ -957,9 +1039,12 @@ def _validate_translated_batch(
 
     failed = False
     reasons: list[str] = []
-    if suspicious_positions and len(suspicious_positions) >= _batch_failure_threshold(len(batch_lines)):
+    if untranslated_positions and len(untranslated_positions) >= _batch_failure_threshold(len(batch_lines)):
         failed = True
-        reasons.append(f"suspicious untranslated lines: {suspicious_positions[:5]}")
+        reasons.append(f"suspicious untranslated lines: {untranslated_positions[:5]}")
+    if boundary_positions and len(boundary_positions) >= 2:
+        failed = True
+        reasons.append(f"possible subtitle boundary drift: {boundary_positions[:5]}")
     if detected_language == source_code:
         failed = True
         reasons.append(f"batch output still looks like source language '{source_code}'")
@@ -1371,6 +1456,81 @@ class OpenAICompatibleTranslator:
         )
         return merged
 
+    async def analyze_visual_scene(
+        self,
+        settings: TranslationSettings,
+        scene_index: int,
+        scene_lines: list[SubtitleLine],
+        movie_context: SessionContext | None,
+        previous_scene: VisualSceneContext | None,
+        frames: list[ExtractedVisualFrame],
+        log_event: LogEvent | None = None,
+    ) -> VisualSceneContext:
+        task_payload = {
+            "task": (
+                "Describe this next visual scene as compact factual evidence for a later subtitle translator. "
+                "Treat the images as an ordered sequence. Use the movie card and previous visual scene only to "
+                "recognize continuity; do not repeat or trust them when current images contradict them. "
+                "Do not translate subtitles, infer hidden events, or claim speaker identity without visible evidence."
+            ),
+            "scene_index": scene_index,
+            "movie_context": movie_context.model_dump() if movie_context else {},
+            "previous_visual_scene": previous_scene.model_dump() if previous_scene else {},
+            "subtitle_lines": [
+                {
+                    "position": line.position,
+                    "start_time": line.start_time,
+                    "end_time": line.end_time,
+                    "text": line.text,
+                }
+                for line in scene_lines
+            ],
+            "frames": [
+                {"image_index": index + 1, "timestamp_ms": frame.timestamp_ms}
+                for index, frame in enumerate(frames)
+            ],
+        }
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": json.dumps(task_payload, ensure_ascii=False)}
+        ]
+        for frame in frames:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": frame.as_data_url()},
+                }
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You create factual visual scene cards from ordered video frames. "
+                    "Prefer uncertainty over guessing. Return JSON only."
+                ),
+            },
+            {"role": "user", "content": content},
+        ]
+        if log_event:
+            log_event(
+                "info",
+                f"Analyzing visual scene {scene_index} with {len(scene_lines)} subtitle lines and {len(frames)} frames",
+            )
+        data = await self._chat_json(
+            settings,
+            messages,
+            "visual_scene_context",
+            _visual_scene_context_schema(),
+        )
+        return VisualSceneContext(
+            scene_index=scene_index,
+            start_position=scene_lines[0].position,
+            end_position=scene_lines[-1].position,
+            start_time=scene_lines[0].start_time,
+            end_time=scene_lines[-1].end_time,
+            frame_ids=[frame.id for frame in frames],
+            **data,
+        )
+
     async def generate_context_from_full_subtitle(
         self,
         settings: TranslationSettings,
@@ -1561,6 +1721,7 @@ class OpenAICompatibleTranslator:
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
+        visual_scene_contexts: list[VisualSceneContext] | None = None,
         allow_visual_doubts: bool = False,
         extra_instruction: str = "",
         log_event: LogEvent | None = None,
@@ -1597,6 +1758,9 @@ class OpenAICompatibleTranslator:
             "source_language": settings.source_language,
             "target_language": settings.target_language,
             "session_context": context_payload,
+            "visual_scene_context": [
+                item.model_dump() for item in (visual_scene_contexts or [])
+            ],
             "lines": line_payload,
         }
         messages = [
@@ -1622,6 +1786,9 @@ class OpenAICompatibleTranslator:
                     {
                         "system": system_instruction,
                         "context": _json_for_prompt_size(context_payload),
+                        "vision": _json_for_prompt_size(
+                            [item.model_dump() for item in (visual_scene_contexts or [])]
+                        ),
                         "lines": _json_for_prompt_size(line_payload),
                         "refs": _json_for_prompt_size(references_payload) if reference_count else "",
                     },
@@ -1680,6 +1847,9 @@ class OpenAICompatibleTranslator:
                     "start_time": source.start_time,
                     "end_time": source.end_time,
                     "provisional_translation": provisional.text,
+                    "current_translation": doubt.current_translation,
+                    "alternative_translation": doubt.alternative_translation,
+                    "translation_impact": doubt.translation_impact,
                     "category": doubt.category,
                     "visual_question": doubt.question,
                 }
@@ -1710,9 +1880,10 @@ class OpenAICompatibleTranslator:
         ]
         task_payload = {
             "task": (
-                "Answer the listed visual questions and revise only those subtitle positions when the images provide useful evidence. "
-                "Keep the provisional translation when evidence is inconclusive. For speaker gender or identity, return unknown or low "
-                "confidence unless the visible evidence strongly links the person to the subtitle."
+                "Use each ordered frame sequence to choose between the supplied current and alternative translations. "
+                "Do not invent a third translation. Select inconclusive when the images do not visibly decide the stated question. "
+                "For speaker gender or identity, use low confidence or inconclusive unless the visible sequence strongly links "
+                "the person to the subtitle."
             ),
             "source_language": settings.source_language,
             "target_language": settings.target_language,
@@ -1740,7 +1911,7 @@ class OpenAICompatibleTranslator:
                 "content": (
                     "You are resolving bounded visual ambiguities in subtitle translation. "
                     "Use only the supplied images and text. Return JSON only. "
-                    "Never revise positions that were not explicitly requested. "
+                    "Choose only current, alternative, or inconclusive for requested positions. "
                     "Do not infer a person's gender or identity from appearance alone when the speaker link is uncertain."
                 ),
             },
@@ -1758,29 +1929,52 @@ class OpenAICompatibleTranslator:
             _visual_clarification_schema(),
         )
 
-        for item in data.get("revisions") or []:
+        observations: list[VisualObservation] = []
+        doubt_by_position = {doubt.position: doubt for doubt in doubts}
+        for item in data.get("decisions") or []:
             try:
                 position = int(item.get("position"))
             except (TypeError, ValueError):
                 continue
-            text = str(item.get("text") or "").strip()
+            doubt = doubt_by_position.get(position)
+            if doubt is None:
+                continue
+            selected = str(item.get("selected") or "inconclusive").strip()
+            evidence_found = bool(item.get("evidence_found"))
+            confidence = str(item.get("confidence") or "unknown").strip()
+            answer = str(item.get("answer") or "").strip()
             source = source_by_position.get(position)
+            text = (
+                doubt.alternative_translation.strip()
+                if selected == "alternative"
+                and evidence_found
+                and confidence == "high"
+                else translated_by_position[position].text
+            )
             if (
                 position in requested_positions
                 and source is not None
                 and text
+                and not (
+                    _normalize_text(source.text).casefold()
+                    == _normalize_text(text).casefold()
+                    and not _looks_like_unchanged_proper_name(
+                        source.text,
+                        text,
+                        session_context,
+                    )
+                )
                 and not _line_looks_untranslated(source.text, text, session_context)
             ):
                 translated_by_position[position] = SubtitleLine(position=position, text=text)
-
-        observations: list[VisualObservation] = []
-        for item in data.get("observations") or []:
-            try:
-                observation = VisualObservation.model_validate(item)
-            except Exception:
-                continue
-            if observation.position in requested_positions:
-                observations.append(observation)
+            observations.append(
+                VisualObservation(
+                    position=position,
+                    category=doubt.category,
+                    answer=answer,
+                    confidence=confidence,
+                )
+            )
 
         return _ordered_lines_from_map(batch_lines, translated_by_position), observations
 
@@ -2010,6 +2204,7 @@ class OpenAICompatibleTranslator:
             (
                 "Translate one subtitle line into the target language. "
                 "Return only JSON with the final text. Preserve proper names unchanged when appropriate. "
+                "Use nearby_lines only as context. Translate only the target line and do not pull text from adjacent subtitle positions. "
                 "Do not update context or explain your reasoning. "
                 + _effective_prompt(
                     settings,
@@ -2069,6 +2264,7 @@ class OpenAICompatibleTranslator:
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
+        visual_scene_contexts: list[VisualSceneContext] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         depth: int = 0,
@@ -2088,6 +2284,7 @@ class OpenAICompatibleTranslator:
             first_half,
             session_context,
             reference_subtitles_by_position=reference_subtitles_by_position,
+            visual_scene_contexts=visual_scene_contexts,
             batch_index=batch_index,
             log_event=log_event,
             depth=depth + 1,
@@ -2099,6 +2296,7 @@ class OpenAICompatibleTranslator:
             second_half,
             context_after_first,
             reference_subtitles_by_position=reference_subtitles_by_position,
+            visual_scene_contexts=visual_scene_contexts,
             batch_index=batch_index,
             log_event=log_event,
             depth=depth + 1,
@@ -2114,6 +2312,7 @@ class OpenAICompatibleTranslator:
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
+        visual_scene_contexts: list[VisualSceneContext] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         depth: int = 0,
@@ -2143,6 +2342,7 @@ class OpenAICompatibleTranslator:
                     batch_lines,
                     session_context,
                     reference_subtitles_by_position=reference_subtitles_by_position,
+                    visual_scene_contexts=visual_scene_contexts,
                     allow_visual_doubts=bool(getattr(settings, "adaptive_vision", False)),
                     extra_instruction=extra_instruction,
                     log_event=log_event,
@@ -2155,6 +2355,7 @@ class OpenAICompatibleTranslator:
                         batch_lines,
                         session_context,
                         reference_subtitles_by_position=reference_subtitles_by_position,
+                        visual_scene_contexts=visual_scene_contexts,
                         batch_index=batch_index,
                         log_event=log_event,
                         depth=depth,
@@ -2282,6 +2483,7 @@ class OpenAICompatibleTranslator:
                 batch_lines,
                 session_context,
                 reference_subtitles_by_position=reference_subtitles_by_position,
+                visual_scene_contexts=visual_scene_contexts,
                 batch_index=batch_index,
                 log_event=log_event,
                 depth=depth,
@@ -2321,6 +2523,7 @@ class OpenAICompatibleTranslator:
         batch_lines: list[SubtitleLine],
         session_context: SessionContext | None,
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
+        visual_scene_contexts: list[VisualSceneContext] | None = None,
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         should_stop: StopCheck | None = None,
@@ -2330,6 +2533,7 @@ class OpenAICompatibleTranslator:
             batch_lines,
             session_context,
             reference_subtitles_by_position=reference_subtitles_by_position,
+            visual_scene_contexts=visual_scene_contexts,
             batch_index=batch_index,
             log_event=log_event,
             should_stop=should_stop,

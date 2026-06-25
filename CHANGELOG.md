@@ -5,6 +5,19 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Optional visual scene guides prepared before translation from ordered video frames
+- Evidence-based visual doubts with explicit current and alternative translations
+- Multi-frame visual sequences and post-vision translation validation
+
+### Changed
+
+- Visual scene analysis and adaptive clarification are now separate runtime options
+- Adaptive vision defaults to one high-impact doubt and four sequence frames
+
 ## [0.2.6] - 2026-05-10
 
 ### Added

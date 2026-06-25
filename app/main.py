@@ -93,7 +93,9 @@ async def get_vision_frame(job_id: str, frame_id: str) -> FileResponse:
     frame = next((item for item in job.visual_frames if item.id == frame_id), None)
     if frame is None:
         raise HTTPException(status_code=404, detail="Vision frame not found")
-    frame_path = job_manager.vision.frame_path(job.id, frame.batch_index, frame.timestamp_ms)
+    is_scene_frame = "scene_context" in frame.categories or frame.id.startswith("b-")
+    cache_batch_index = -frame.batch_index if is_scene_frame else frame.batch_index
+    frame_path = job_manager.vision.frame_path(job.id, cache_batch_index, frame.timestamp_ms)
     if not frame_path.is_file():
         raise HTTPException(status_code=404, detail="Vision frame file not found")
     return FileResponse(
@@ -179,9 +181,12 @@ async def create_job(
     batch_size: int = Form(default=10),
     temperature: float = Form(default=0.2),
     structured_context: bool = Form(default=True),
+    visual_scene_context: bool = Form(default=False),
+    visual_scene_frames: int = Form(default=4),
+    visual_scene_frame_max_side: int = Form(default=640),
     adaptive_vision: bool = Form(default=False),
-    vision_max_doubts: int = Form(default=3),
-    vision_max_frames: int = Form(default=2),
+    vision_max_doubts: int = Form(default=1),
+    vision_max_frames: int = Form(default=4),
     vision_frame_max_side: int = Form(default=448),
     initial_card_strategy: str = Form(default="auto"),
     initial_card_max_chars: int = Form(default=24000),
@@ -209,6 +214,9 @@ async def create_job(
             batch_size=batch_size,
             temperature=temperature,
             structured_context=structured_context,
+            visual_scene_context=visual_scene_context,
+            visual_scene_frames=visual_scene_frames,
+            visual_scene_frame_max_side=visual_scene_frame_max_side,
             adaptive_vision=adaptive_vision,
             vision_max_doubts=vision_max_doubts,
             vision_max_frames=vision_max_frames,
@@ -227,12 +235,13 @@ async def create_job(
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
-    if adaptive_vision and not (video_file and video_file.filename):
-        raise HTTPException(status_code=400, detail="Adaptive vision requires a video file")
+    vision_enabled = adaptive_vision or visual_scene_context
+    if vision_enabled and not (video_file and video_file.filename):
+        raise HTTPException(status_code=400, detail="Visual features require a video file")
 
     reference_sources = await _read_reference_sources(reference_files, reference_languages)
     video_path = ""
-    if adaptive_vision and video_file and video_file.filename:
+    if vision_enabled and video_file and video_file.filename:
         video_path = await _save_video_upload(video_file)
     try:
         job = job_manager.create_job(
@@ -241,7 +250,7 @@ async def create_job(
             original_srt=content,
             settings=settings,
             reference_sources=reference_sources,
-            video_filename=str(video_file.filename or "") if adaptive_vision and video_file else "",
+            video_filename=str(video_file.filename or "") if vision_enabled and video_file else "",
             video_path=video_path,
         )
     except Exception:
