@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from mimetypes import guess_type
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from app.models import (
     JobStatus,
     ModelListResponse,
     ModelTestResponse,
+    ReloadJobResponse,
     ResumeJobRequest,
     RetranslateLineRequest,
     RuntimeDefaultsResponse,
@@ -83,6 +85,36 @@ async def get_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return _job_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/reload", response_model=ReloadJobResponse)
+async def get_job_reload(job_id: str) -> ReloadJobResponse:
+    payload = job_manager.build_reload_payload(
+        job_id,
+        video_download_url=f"/api/jobs/{job_id}/reload/video",
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return payload
+
+
+@app.get("/api/jobs/{job_id}/reload/video")
+async def get_job_reload_video(job_id: str) -> FileResponse:
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.video_filename or not job.video_path:
+        raise HTTPException(status_code=404, detail="Job video is not available")
+    video_path = Path(job.video_path)
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Job video is not available")
+    media_type = guess_type(job.video_filename)[0] or "application/octet-stream"
+    return FileResponse(
+        video_path,
+        media_type=media_type,
+        filename=job.video_filename,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.get("/api/jobs/{job_id}/vision/frames/{frame_id}")

@@ -65,6 +65,7 @@ const sceneVisionControls = document.getElementById("scene-vision-controls");
 const adaptiveVisionControls = document.getElementById("adaptive-vision-controls");
 const visionReadiness = document.getElementById("vision-readiness");
 const resetPromptLabBtn = document.getElementById("reset-prompt-lab-btn");
+const formReloadStatus = document.getElementById("form-reload-status");
 const consoleTabButtons = [...document.querySelectorAll("[data-console-tab]")];
 const consoleTabPanels = [...document.querySelectorAll("[data-console-panel]")];
 
@@ -787,6 +788,23 @@ function setModelListStatus(message, ok = true) {
   if (!modelListStatus) return;
   modelListStatus.textContent = message || "";
   modelListStatus.style.color = ok ? "var(--ok)" : "var(--danger)";
+}
+
+function clearFormReloadStatus() {
+  if (!formReloadStatus) return;
+  formReloadStatus.hidden = true;
+  formReloadStatus.classList.remove("warn");
+  formReloadStatus.innerHTML = "";
+}
+
+function setFormReloadStatus(title, detail = "", tone = "info") {
+  if (!formReloadStatus) return;
+  formReloadStatus.hidden = false;
+  formReloadStatus.classList.toggle("warn", tone === "warn");
+  formReloadStatus.innerHTML = `
+    <strong>${escapeHtml(title || "")}</strong>
+    ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
+  `;
 }
 
 function readStoredSettings() {
@@ -2064,12 +2082,17 @@ function renderJobs(jobs) {
       const issueCount = Array.isArray(job.validation_issues) ? job.validation_issues.length : 0;
       const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
       const canResume = job.status === "paused" || job.status === "failed";
+      const canReload = job.status !== "processing" && job.status !== "queued";
       const resumeLabel = job.status === "failed" ? "Resume Failed" : "Resume";
       const resumeTitle = job.status === "failed"
         ? "Resume this failed translation from the last unfinished batch using current Prompt Lab runtime settings."
         : "Resume this paused translation using current Prompt Lab runtime settings.";
       const canEditContext = job?.job_kind !== "review";
       const editContextTitle = "Edit the context card and language tips used by resume/retranslation calls.";
+      const reloadLabel = job?.job_kind === "review" ? "Load Review" : "Load Again";
+      const reloadTitle = job?.job_kind === "review"
+        ? "Restore this finished review job's files and settings into the console so you can run it again with different options."
+        : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
       <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
@@ -2113,6 +2136,7 @@ function renderJobs(jobs) {
         </div>
         <div class="job-actions">
           <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
+          <button class="ghost" data-action="reload-job" data-id="${job.id}" title="${escapeHtml(reloadTitle)}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
           <button class="ghost" data-action="edit" data-id="${job.id}" title="${escapeHtml(editContextTitle)}" ${!canEditContext ? "disabled" : ""}>Edit Context</button>
           <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Inspect flagged subtitle lines and save manual fixes." ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}" title="Download the current translated subtitle file.">Download</button>` : ""}
@@ -2736,6 +2760,7 @@ async function createJob(event) {
     rememberModel(document.getElementById("model")?.value);
     form.reset();
     loadSettings();
+    clearFormReloadStatus();
     updateSelectedFileLabel();
     updateSelectedTranslatedFileLabel();
     updateSelectedVideoFileLabel();
@@ -2788,6 +2813,7 @@ async function createReviewJob() {
   }
   rememberLanguageTip(payload.target_language_tips);
   rememberModel(document.getElementById("model")?.value);
+  clearFormReloadStatus();
   await fetchJobs();
 }
 
@@ -2809,6 +2835,103 @@ function setInputFile(input, file) {
   const transfer = new DataTransfer();
   transfer.items.add(file);
   input.files = transfer.files;
+}
+
+function createSrtFile(filename, content) {
+  return new File([content], filename || "subtitle.srt", {
+    type: "application/x-subrip;charset=utf-8",
+  });
+}
+
+function applyReloadSettings(payload) {
+  const settings = payload?.settings || {};
+  const values = {
+    ...settings,
+    title: payload?.title ?? settings.title ?? "",
+  };
+  for (const element of form.elements) {
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
+    if (!(element.id in values)) continue;
+    const value = values[element.id];
+    if (element.type === "checkbox") {
+      element.checked = Boolean(value);
+    } else {
+      element.value = value ?? "";
+    }
+  }
+  updateVisionControls();
+  rememberModel(values.model);
+  saveSettings();
+  renderModelHistory();
+  renderModelSelect();
+}
+
+function resetJobFormFiles() {
+  if (form) form.reset();
+  resetReferenceTrackRows();
+  sourceSubtitleTextStats = null;
+}
+
+async function reloadJobIntoForm(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}/reload`);
+  if (!response.ok) {
+    alert(await responseErrorDetail(response, "Could not reload this job into the form."));
+    return;
+  }
+  const payload = await response.json();
+  const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
+
+  resetJobFormFiles();
+  applyReloadSettings(payload);
+
+  if (payload?.source_file?.content) {
+    setInputFile(fileInput, createSrtFile(payload.source_file.filename, payload.source_file.content));
+  }
+  if (payload.job_kind === "review" && payload?.translated_file?.content) {
+    setInputFile(
+      translatedFileInput,
+      createSrtFile(payload.translated_file.filename, payload.translated_file.content),
+    );
+  }
+  for (const reference of Array.isArray(payload.reference_files) ? payload.reference_files : []) {
+    const row = addReferenceTrackRow(reference.language || "");
+    if (row) {
+      attachReferenceFileToRow(row, createSrtFile(reference.filename, reference.content || ""));
+    }
+  }
+  if (payload?.video_file?.available && payload?.video_file?.download_url) {
+    try {
+      const videoResponse = await fetch(payload.video_file.download_url);
+      if (!videoResponse.ok) {
+        warnings.push("The original video could not be fetched back into the form.");
+      } else {
+        const videoBlob = await videoResponse.blob();
+        const videoType = videoBlob.type || "application/octet-stream";
+        const videoFile = new File([videoBlob], payload.video_file.filename || "source-video", { type: videoType });
+        setInputFile(videoFileInput, videoFile);
+      }
+    } catch (_) {
+      warnings.push("The original video could not be fetched back into the form.");
+    }
+  }
+
+  updateSelectedFileLabel();
+  updateSelectedTranslatedFileLabel();
+  updateSelectedVideoFileLabel();
+  renderReferenceTrackEmptyState();
+  await refreshInitialCardEstimate();
+  setConsoleTab("runtime");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+
+  const modeLabel = payload.job_kind === "review" ? "review setup" : "translation setup";
+  const detail = warnings.length
+    ? `${modeLabel} restored. ${warnings.join(" ")}`
+    : `${modeLabel} restored with the original settings and files. Adjust anything you want, then start a new run.`;
+  setFormReloadStatus(
+    payload.job_kind === "review" ? "Review job loaded back into the console." : "Job loaded back into the console.",
+    detail,
+    warnings.length ? "warn" : "info",
+  );
 }
 
 function handleDroppedFiles(files, targetInput = fileInput) {
@@ -2949,6 +3072,11 @@ async function performAction(action, jobId, filter = "all") {
     link.download = data.filename;
     link.click();
     URL.revokeObjectURL(url);
+    return;
+  }
+
+  if (action === "reload-job") {
+    await reloadJobIntoForm(jobId);
     return;
   }
 

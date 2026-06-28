@@ -15,8 +15,13 @@ from app.models import (
     JobLogEntry,
     JobStatus,
     QueuedLineRetranslation,
+    ReloadJobFile,
+    ReloadJobReferenceFile,
+    ReloadJobResponse,
+    ReloadJobVideo,
     ReferenceSubtitleTrack,
     SessionContext,
+    StoredReferenceUpload,
     SubtitleLine,
     SubtitleValidationIssue,
     TranslationJob,
@@ -143,6 +148,65 @@ class JobManager:
 
     def get_job(self, job_id: str) -> TranslationJob | None:
         return self.jobs.get(job_id)
+
+    def build_reload_payload(self, job_id: str, *, video_download_url: str = "") -> ReloadJobResponse | None:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+
+        warnings: list[str] = []
+        source_filename = job.source_filename or ""
+        if not source_filename:
+            if job.job_kind == "review":
+                source_filename = "source.srt"
+                warnings.append("This older review job did not preserve the original source filename, so a generic name was used.")
+            else:
+                source_filename = job.filename or "source.srt"
+        translated_file = None
+        if job.job_kind == "review":
+            translated_content = job.translated_srt or ""
+            if translated_content:
+                translated_file = ReloadJobFile(
+                    filename=job.filename or "translated.srt",
+                    content=translated_content,
+                )
+            else:
+                warnings.append("The translated review subtitle is no longer stored for this job.")
+
+        reference_files = [
+            ReloadJobReferenceFile(
+                filename=item.filename or "reference.srt",
+                language=item.language,
+                content=item.content,
+            )
+            for item in job.reference_uploads
+            if item.content
+        ]
+        if job.reference_tracks and not reference_files:
+            warnings.append("Reference subtitle uploads were not stored for this older job, so they could not be reloaded.")
+
+        video_available = bool(job.video_filename and job.video_path and Path(job.video_path).is_file())
+        if job.video_filename and not video_available:
+            warnings.append("The original video file is no longer available, so visual features will need a new upload.")
+
+        return ReloadJobResponse(
+            job_id=job.id,
+            job_kind=job.job_kind,
+            title=job.title,
+            settings=job.settings,
+            source_file=ReloadJobFile(
+                filename=source_filename,
+                content=job.original_srt,
+            ),
+            translated_file=translated_file,
+            reference_files=reference_files,
+            video_file=ReloadJobVideo(
+                filename=job.video_filename or "",
+                available=video_available,
+                download_url=video_download_url if video_available else "",
+            ),
+            warnings=warnings,
+        )
 
     def _append_log(
         self,
@@ -634,6 +698,21 @@ class JobManager:
             )
         return tracks
 
+    def _build_reference_uploads(
+        self,
+        reference_sources: list[dict[str, str]] | None = None,
+    ) -> list[StoredReferenceUpload]:
+        uploads: list[StoredReferenceUpload] = []
+        for source in reference_sources or []:
+            uploads.append(
+                StoredReferenceUpload(
+                    filename=str(source.get("filename") or "reference.srt").strip() or "reference.srt",
+                    language=str(source.get("language") or "").strip(),
+                    content=str(source.get("content") or ""),
+                )
+            )
+        return uploads
+
     def _reference_payload_for_positions(
         self,
         job: TranslationJob,
@@ -1116,13 +1195,16 @@ class JobManager:
 
         _, lines = parse_srt_text(original_srt)
         reference_tracks = self._build_reference_tracks(lines, reference_sources)
+        reference_uploads = self._build_reference_uploads(reference_sources)
         job = TranslationJob(
             filename=filename,
+            source_filename=filename,
             title=title or filename.rsplit(".", 1)[0],
             settings=settings,
             original_srt=original_srt,
             original_lines=lines,
             reference_tracks=reference_tracks,
+            reference_uploads=reference_uploads,
             video_filename=video_filename,
             video_path=video_path,
         )
@@ -1171,8 +1253,10 @@ class JobManager:
         _, translated_lines = parse_srt_text(translated_srt)
         translated_lines = strip_ai_disclosure_line(translated_lines)
         reference_tracks = self._build_reference_tracks(source_lines, reference_sources)
+        reference_uploads = self._build_reference_uploads(reference_sources)
         job = TranslationJob(
             filename=translated_filename,
+            source_filename=source_filename,
             title=title or translated_filename.rsplit(".", 1)[0],
             job_kind="review",
             settings=settings,
@@ -1181,6 +1265,7 @@ class JobManager:
             translated_srt=translated_srt,
             translated_lines=translated_lines,
             reference_tracks=reference_tracks,
+            reference_uploads=reference_uploads,
         )
         self._append_log(
             job,

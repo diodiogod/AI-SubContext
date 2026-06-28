@@ -1052,6 +1052,32 @@ button.danger {
   min-height: 1.4rem;
   margin-top: -0.1rem;
 }
+.form-reload-status {
+  display: grid;
+  gap: 0.28rem;
+  margin-top: -0.1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(120, 230, 222, 0.24);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(120, 230, 222, 0.12), transparent 56%),
+    rgba(255, 255, 255, 0.03);
+  color: var(--text);
+}
+.form-reload-status strong {
+  font-size: 0.95rem;
+}
+.form-reload-status span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.form-reload-status.warn {
+  border-color: rgba(243, 191, 120, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(243, 191, 120, 0.14), transparent 56%),
+    rgba(255, 255, 255, 0.03);
+}
 .prompt-lab-summary {
   margin-top: -0.1rem;
 }

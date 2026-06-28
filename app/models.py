@@ -193,9 +193,16 @@ class ReferenceSubtitleTrack(BaseModel):
     aligned_lines: list[ReferenceSubtitleMatch] = Field(default_factory=list)
 
 
+class StoredReferenceUpload(BaseModel):
+    filename: str
+    language: str
+    content: str = ""
+
+
 class TranslationJob(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     filename: str
+    source_filename: str = ""
     title: str
     job_kind: str = "translation"
     settings: TranslationSettings
@@ -203,6 +210,7 @@ class TranslationJob(BaseModel):
     original_lines: list[SubtitleLine]
     translated_lines: list[SubtitleLine] = Field(default_factory=list)
     reference_tracks: list[ReferenceSubtitleTrack] = Field(default_factory=list)
+    reference_uploads: list[StoredReferenceUpload] = Field(default_factory=list)
     video_filename: str = ""
     video_path: str = ""
     session_context: SessionContext | None = None
@@ -253,6 +261,35 @@ class GenerateContextResponse(BaseModel):
 
 class CreateJobResponse(BaseModel):
     job_id: str
+
+
+class ReloadJobFile(BaseModel):
+    filename: str
+    content: str
+
+
+class ReloadJobReferenceFile(BaseModel):
+    filename: str
+    language: str
+    content: str
+
+
+class ReloadJobVideo(BaseModel):
+    filename: str = ""
+    available: bool = False
+    download_url: str = ""
+
+
+class ReloadJobResponse(BaseModel):
+    job_id: str
+    job_kind: str
+    title: str
+    settings: TranslationSettings
+    source_file: ReloadJobFile
+    translated_file: ReloadJobFile | None = None
+    reference_files: list[ReloadJobReferenceFile] = Field(default_factory=list)
+    video_file: ReloadJobVideo = Field(default_factory=ReloadJobVideo)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ModelTestResponse(BaseModel):
