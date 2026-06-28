@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -304,6 +305,24 @@ class VideoFrameProvider:
 
     def frame_path(self, job_id: str, batch_index: int, timestamp_ms: int) -> Path:
         return self.cache_root / job_id / f"batch-{batch_index}-{timestamp_ms}.jpg"
+
+    def clone_scene_cache(self, source_job_id: str, target_job_id: str) -> int:
+        source_dir = self.cache_root / source_job_id
+        if not source_dir.is_dir():
+            return 0
+        target_dir = self.cache_root / target_job_id
+        copied = 0
+        for source in source_dir.glob("batch--*.jpg"):
+            if not source.is_file() or source.stat().st_size == 0:
+                continue
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / source.name
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copy2(source, target)
+            copied += 1
+        return copied
 
     async def _extract_frame(
         self,

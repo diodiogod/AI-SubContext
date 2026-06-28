@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260627-1" />
+    <link rel="stylesheet" href="/static/app.css?v=20260628-1" />
   </head>
   <body>
     <main class="shell">
@@ -50,16 +50,46 @@
               <span class="secondary-file-label">Translated File for Review</span>
               <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
             </label>
-            <label
-              id="video-file-picker"
-              class="secondary-file"
-              for="video_file"
-              title="Optional source video for visual scene guides and evidence-based clarification."
-            >
-              <input type="file" id="video_file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" hidden />
-              <span class="secondary-file-label">Source Video for Vision</span>
-              <span id="selected-video-file" class="secondary-file-value">Drop a video here or click to browse</span>
-            </label>
+            <section class="video-source-card">
+              <div class="video-source-head">
+                <div>
+                  <div class="secondary-file-label">Source Video for Vision</div>
+                  <div class="secondary-file-value">Use the original file directly. The app will not copy, move, or delete it.</div>
+                </div>
+                <span class="video-source-badge">No copy</span>
+              </div>
+              <div class="video-path-row">
+                <input
+                  type="text"
+                  id="local_video_path"
+                  data-transient="true"
+                  placeholder="Choose a local video or paste its full path"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button type="button" id="pick-local-video-btn">Choose Video</button>
+                <button type="button" id="drop-local-video-btn" class="ghost">Drop Video</button>
+                <button type="button" id="clear-local-video-btn" class="ghost" hidden>Clear</button>
+              </div>
+              <div id="selected-local-video" class="video-path-status">No local video selected.</div>
+              <label id="reuse-visual-context-option" class="reuse-visual-context-option" hidden>
+                <input type="checkbox" id="reuse_visual_context" data-transient="true" checked />
+                <span>
+                  <strong id="reuse-visual-context-title">Reuse completed scene guides</strong>
+                  <small id="reuse-visual-context-note">Translation restarts from line 1; the existing visual analysis is not regenerated.</small>
+                </span>
+              </label>
+              <label
+                id="video-file-picker"
+                class="secondary-file video-upload-fallback"
+                for="video_file"
+                title="Compatibility fallback. Uploads and stores a separate workspace copy of the video."
+              >
+                <input type="file" id="video_file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" hidden />
+                <span class="secondary-file-label">Upload a Copy Instead</span>
+                <span id="selected-video-file" class="secondary-file-value">Fallback for remote setups; this duplicates the video.</span>
+              </label>
+            </section>
             <section class="reference-tracks-card">
               <div class="reference-tracks-head">
                 <div>
@@ -413,6 +443,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260627-1"></script>
+    <script src="/static/app.js?v=20260627-4"></script>
   </body>
 </html>

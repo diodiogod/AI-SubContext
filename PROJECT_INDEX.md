@@ -22,9 +22,14 @@ AI SubContext is a local FastAPI application with a vanilla HTML/CSS/JavaScript 
 - Each translated line must contain only its matching source line. Neighboring lines are context and must never be merged into it.
 - Jobs are persisted after meaningful changes and unfinished jobs are restored as paused.
 - The primary source SRT is canonical. Secondary subtitle tracks are supporting evidence only.
+- Prompt templates use runtime language variables such as `{{source_language}}` and `{{target_language}}`; model-facing values include both readable names and codes.
+- Reference, scene, adaptive-vision, and rolling-context prompt blocks are appended only when that feature and its evidence are active for the request.
 - Translation and review jobs share `TranslationJob` but use different execution paths.
 - Visual scene guides are created before translation and attached only to overlapping batches.
+- Clean reruns may reuse scene guides only when the primary source SRT is identical; translated lines and adaptive decisions are never carried over.
 - Adaptive visual clarification is bounded: the translator must supply a current translation, a concrete alternative, and a visually answerable question.
+- Local video paths are external, read-only inputs and must never be deleted. Only videos marked `video_managed` belong to the app.
+- Browser drag-and-drop cannot expose absolute paths. The Windows-native picker/drop endpoints return paths without transferring video bytes.
 - The frontend has no framework. When settings or payloads change, update the backend models, form handling, HTML, and JavaScript together.
 
 ## Main Flows
@@ -84,7 +89,7 @@ Common finding states are `suspect`, `error`, `auto_fixed`, and `manual_fixed`.
 
 - `app/static/index.html`, `app.js`, `app.css` - main translation console and shared styling
 - `app/static/review.html`, `review.js` - line review, filters, bulk actions, retranslations, and batch cards
-- `app/static/prompt_lab.html`, `prompt_lab.js` - editable prompts, token limit, and timeout
+- `app/static/prompt_lab.html`, `prompt_lab.js` - editable prompt templates, insertable variables, token limit, and timeout
 
 The console and review workspace poll job APIs every 2.5 seconds. There are no WebSockets.
 
@@ -105,12 +110,12 @@ When adding persisted fields, provide defaults so older `data/jobs.json` files c
 Git-ignored runtime data:
 
 - `data/jobs.json` - serialized jobs
-- `data/videos/` - uploaded vision videos
+- `data/videos/` - managed upload copies and hard-linked rerun videos; direct local videos stay at their original paths
 - `data/vision_cache/` - extracted JPEG frames
 - `ignored/` - local tests and scratch assets
 - `venv-linux/`, `venv-win/` - launcher-managed environments
 
-State writes use a temporary file and atomic replacement. Deleting a job also removes its managed video and frame cache.
+State writes use a temporary file and atomic replacement. Deleting a job removes only app-managed videos and frame caches, never an external source video.
 
 ## Runtime
 

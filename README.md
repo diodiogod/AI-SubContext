@@ -57,10 +57,11 @@ Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using 
 - live context updates as translation progresses
 - edit the main context card while a job is running
 - save, inspect, generate, and edit per-batch context snapshots
-- edit all translation and context prompts through Prompt Lab
+- edit all translation and context prompts through Prompt Lab using runtime variables for readable source and target language names
 - optional visual scene guides built from ordered frames before translation and attached only to overlapping subtitle batches
 - optional evidence-based clarification that requires two different translations before requesting a short frame sequence
 - visual revisions are checked again before replacing the provisional translation
+- choose or drag videos through native local dialogs to read the original path without copying; an explicitly labeled upload-copy fallback remains for remote setups
 
 ### Review
 
@@ -74,6 +75,7 @@ Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using 
 ### Reliability
 
 - pause, resume, stop, and resume-from-failed translation jobs
+- restart canceled jobs from line one with new instructions while reusing completed visual scene guides
 - stricter retry, batch autosplit, and weak-model recovery handling
 - less aggressive isolated auto-retry so borderline lines stay available for manual review
 - invalid JSON model errors are surfaced with clearer messages
@@ -98,7 +100,7 @@ Linux:
 - This project currently focuses on `.srt` only.
 - Adaptive vision requires a multimodal model and FFmpeg available on `PATH`.
 - It expects an OpenAI-compatible endpoint such as LM Studio, OpenRouter, or another compatible local or remote server.
-- Prompt templates and runtime controls are editable in Prompt Lab.
+- Prompt templates and runtime controls are editable in Prompt Lab. Reference, visual, and rolling-context instructions are attached only when active for a request.
 - Settings are stored in browser local storage for convenience.
 - Jobs are persisted to `data/jobs.json`, and unfinished translation jobs are restored as paused on startup.
 - Review imports detect and ignore AI SubContext's own branded footer subtitle automatically.

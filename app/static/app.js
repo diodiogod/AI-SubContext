@@ -38,12 +38,21 @@ const generateSnapshotBtn = document.getElementById("generate-snapshot-btn");
 const fileInput = document.getElementById("file");
 const translatedFileInput = document.getElementById("translated_file");
 const videoFileInput = document.getElementById("video_file");
+const localVideoPathInput = document.getElementById("local_video_path");
+const pickLocalVideoBtn = document.getElementById("pick-local-video-btn");
+const dropLocalVideoBtn = document.getElementById("drop-local-video-btn");
+const clearLocalVideoBtn = document.getElementById("clear-local-video-btn");
 const dropZone = document.getElementById("drop-zone");
 const translatedDropZone = document.getElementById("translated-drop-zone");
 const videoDropZone = document.getElementById("video-file-picker");
 const selectedFile = document.getElementById("selected-file");
 const selectedTranslatedFile = document.getElementById("selected-translated-file");
 const selectedVideoFile = document.getElementById("selected-video-file");
+const selectedLocalVideo = document.getElementById("selected-local-video");
+const reuseVisualContextOption = document.getElementById("reuse-visual-context-option");
+const reuseVisualContextInput = document.getElementById("reuse_visual_context");
+const reuseVisualContextTitle = document.getElementById("reuse-visual-context-title");
+const reuseVisualContextNote = document.getElementById("reuse-visual-context-note");
 const referenceTracksCard = document.querySelector(".reference-tracks-card");
 const referenceTracksEl = document.getElementById("reference-tracks");
 const addReferenceTrackBtn = document.getElementById("add-reference-track-btn");
@@ -85,6 +94,9 @@ let initialCardEstimateToken = 0;
 let sourceSubtitleTextStats = null;
 let runtimeDefaults = {};
 let createJobInFlight = false;
+let reusableVideoSource = null;
+let reusableVisualContextSource = null;
+let reusableVisualContextVideoChanged = false;
 const expandedContextHistory = new Set();
 const renderedContextSnapshots = new Map();
 const modelCallParserState = new Map();
@@ -823,6 +835,7 @@ async function fetchRuntimeDefaults() {
     const response = await fetch("/api/runtime/defaults");
     if (!response.ok) return;
     runtimeDefaults = await response.json();
+    delete runtimeDefaults.legacy_prompt_fingerprints;
   } catch (_) {
     runtimeDefaults = {};
   }
@@ -889,7 +902,7 @@ function loadSettings() {
 function saveSettings() {
   const payload = { ...readStoredSettings() };
   for (const element of form.elements) {
-    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON" || element.dataset.transient === "true") continue;
     payload[element.id] = element.type === "checkbox" ? element.checked : element.value;
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -918,10 +931,43 @@ async function responseErrorDetail(response, fallbackMessage) {
   return fallbackMessage;
 }
 
+function formatFileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size >= 1024 ** 3) return `${(size / (1024 ** 3)).toFixed(1)} GB`;
+  if (size >= 1024 ** 2) return `${(size / (1024 ** 2)).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} bytes`;
+}
+
+function postFormDataWithProgress(url, data, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(event.loaded, event.total);
+      }
+    });
+    request.addEventListener("load", () => {
+      const headers = new Headers();
+      const contentType = request.getResponseHeader("Content-Type");
+      if (contentType) headers.set("Content-Type", contentType);
+      resolve(new Response(request.responseText, {
+        status: request.status,
+        statusText: request.statusText,
+        headers,
+      }));
+    });
+    request.addEventListener("error", () => reject(new Error("Could not reach the subtitle server.")));
+    request.addEventListener("abort", () => reject(new Error("Job upload was cancelled.")));
+    request.send(data);
+  });
+}
+
 function collectSettingsPayload() {
   const payload = { ...runtimeDefaults, ...readStoredSettings() };
   for (const element of form.elements) {
-    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON" || element.dataset.transient === "true") continue;
     payload[element.id] = element.type === "checkbox" ? element.checked : element.value;
   }
   return payload;
@@ -947,6 +993,31 @@ function updateSelectedFileLabel() {
   void refreshInitialCardEstimate();
 }
 
+function updateReusableVisualContextOption() {
+  const count = Number(reusableVisualContextSource?.count || 0);
+  if (reuseVisualContextOption) reuseVisualContextOption.hidden = count <= 0;
+  if (reuseVisualContextTitle && count > 0) {
+    reuseVisualContextTitle.textContent = `Reuse ${count} completed scene guide${count === 1 ? "" : "s"}`;
+  }
+  if (reuseVisualContextNote) {
+    reuseVisualContextNote.textContent = reusableVisualContextVideoChanged && count > 0
+      ? "The video selection changed. Keep this enabled only if it is the same cut and timing."
+      : "Translation restarts from line 1; the existing visual analysis is not regenerated.";
+  }
+}
+
+function clearReusableVisualContext() {
+  reusableVisualContextSource = null;
+  reusableVisualContextVideoChanged = false;
+  if (reuseVisualContextInput) reuseVisualContextInput.checked = false;
+  updateReusableVisualContextOption();
+}
+
+function acceptSelectedSourceFile() {
+  clearReusableVisualContext();
+  updateSelectedFileLabel();
+}
+
 function updateSelectedTranslatedFileLabel() {
   const file = translatedFileInput.files && translatedFileInput.files[0];
   selectedTranslatedFile.innerHTML = file ? escapeHtml(file.name) : `Optional second <code>.srt</code>`;
@@ -956,20 +1027,96 @@ function updateSelectedVideoFileLabel() {
   const file = videoFileInput?.files && videoFileInput.files[0];
   if (selectedVideoFile) {
     selectedVideoFile.textContent = file
-      ? file.name
-      : "Drop a video here or click to browse";
+      ? `${file.name} (${formatFileSize(file.size)} workspace copy)`
+      : "Fallback for remote setups; this duplicates the video.";
   }
+  const localPath = localVideoPathInput?.value.trim() || "";
+  if (selectedLocalVideo) {
+    if (localPath) {
+      selectedLocalVideo.textContent = `${localPath} · original file, no copy`;
+      selectedLocalVideo.classList.add("ready");
+    } else if (reusableVideoSource?.filename) {
+      selectedLocalVideo.textContent = `${reusableVideoSource.filename} · reused from the previous job, no upload`;
+      selectedLocalVideo.classList.add("ready");
+    } else {
+      selectedLocalVideo.textContent = "No local video selected.";
+      selectedLocalVideo.classList.remove("ready");
+    }
+  }
+  if (clearLocalVideoBtn) clearLocalVideoBtn.hidden = !localPath && !reusableVideoSource;
   updateVisionControls();
 }
 
 function acceptSelectedVideo() {
   const file = videoFileInput?.files && videoFileInput.files[0];
+  if (file) {
+    reusableVideoSource = null;
+    reusableVisualContextVideoChanged = Boolean(reusableVisualContextSource);
+    if (localVideoPathInput) localVideoPathInput.value = "";
+  }
   if (file && visualSceneContextInput && adaptiveVisionInput) {
     if (!visualSceneContextInput.checked && !adaptiveVisionInput.checked) {
       visualSceneContextInput.checked = true;
     }
     saveSettings();
   }
+  updateReusableVisualContextOption();
+  updateSelectedVideoFileLabel();
+}
+
+function acceptLocalVideoPath() {
+  const localPath = localVideoPathInput?.value.trim() || "";
+  if (localPath) {
+    reusableVideoSource = null;
+    reusableVisualContextVideoChanged = Boolean(reusableVisualContextSource);
+    if (videoFileInput) videoFileInput.value = "";
+    if (visualSceneContextInput && adaptiveVisionInput) {
+      if (!visualSceneContextInput.checked && !adaptiveVisionInput.checked) {
+        visualSceneContextInput.checked = true;
+      }
+      saveSettings();
+    }
+  }
+  updateReusableVisualContextOption();
+  updateSelectedVideoFileLabel();
+}
+
+async function requestLocalVideoPath(endpoint, button, waitingLabel) {
+  if (!button) return;
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = waitingLabel;
+  try {
+    const response = await fetch(endpoint, { method: "POST" });
+    if (!response.ok) {
+      alert(await responseErrorDetail(response, "Could not open local video selection."));
+      return;
+    }
+    const payload = await response.json();
+    if (payload.cancelled) return;
+    if (localVideoPathInput) localVideoPathInput.value = payload.path || "";
+    acceptLocalVideoPath();
+  } catch (error) {
+    alert(error?.message || "Could not open local video selection.");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+async function pickLocalVideo() {
+  await requestLocalVideoPath("/api/local-video/pick", pickLocalVideoBtn, "Opening...");
+}
+
+async function dropLocalVideo() {
+  await requestLocalVideoPath("/api/local-video/drop", dropLocalVideoBtn, "Waiting for Drop...");
+}
+
+function clearLocalVideo() {
+  reusableVideoSource = null;
+  reusableVisualContextVideoChanged = Boolean(reusableVisualContextSource);
+  if (localVideoPathInput) localVideoPathInput.value = "";
+  updateReusableVisualContextOption();
   updateSelectedVideoFileLabel();
 }
 
@@ -982,16 +1129,21 @@ function updateVisionControls() {
   if (adaptiveVisionControls) adaptiveVisionControls.hidden = !adaptiveEnabled;
   if (!visionReadiness) return;
   const video = videoFileInput?.files && videoFileInput.files[0];
+  const localPath = localVideoPathInput?.value.trim() || "";
   if (!enabled) {
     visionReadiness.textContent = "";
-  } else if (!video) {
+  } else if (!video && !localPath && !reusableVideoSource) {
     visionReadiness.textContent = "Select a source video to use the visual features.";
   } else {
     const modes = [
       sceneEnabled ? "scene guides before translation" : "",
       adaptiveEnabled ? "evidence-based doubt resolution during translation" : "",
     ].filter(Boolean);
-    visionReadiness.textContent = `${video.name} ready for ${modes.join(" and ")}.`;
+    const videoName = localPath.split(/[\\/]/).pop()
+      || video?.name
+      || reusableVideoSource?.filename
+      || "Stored source video";
+    visionReadiness.textContent = `${videoName} ready for ${modes.join(" and ")}.`;
   }
 }
 
@@ -2089,10 +2241,16 @@ function renderJobs(jobs) {
         : "Resume this paused translation using current Prompt Lab runtime settings.";
       const canEditContext = job?.job_kind !== "review";
       const editContextTitle = "Edit the context card and language tips used by resume/retranslation calls.";
-      const reloadLabel = job?.job_kind === "review" ? "Load Review" : "Load Again";
+      const reloadLabel = job?.job_kind === "review"
+        ? "Load Review"
+        : job.status === "cancelled"
+          ? "Restart Clean"
+          : "Load Again";
       const reloadTitle = job?.job_kind === "review"
         ? "Restore this finished review job's files and settings into the console so you can run it again with different options."
-        : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
+        : job.status === "cancelled"
+          ? "Restart from line 1 with different settings while retaining completed visual scene guides."
+          : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
       <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
@@ -2268,6 +2426,7 @@ function renderLogDialog(job, options = {}) {
         <div class="mini-eyebrow">Visual Understanding</div>
         <p class="job-meta">
           ${escapeHtml(job.video_filename || "Source video loaded")}.
+          ${job.video_managed === false ? "Using the original file directly; no workspace copy." : "Using an app-managed workspace copy."}
           ${sceneVisionEnabled ? "Scene guides are prepared before translation." : ""}
           ${adaptiveVisionEnabled ? "Translation doubts require a concrete alternative before frames are requested." : ""}
         </p>
@@ -2718,10 +2877,17 @@ async function createJob(event) {
   const file = fileInput.files[0];
   if (!file) return;
   const videoFile = videoFileInput?.files && videoFileInput.files[0];
+  const localVideoPath = localVideoPathInput?.value.trim() || "";
+  const reusableVideoJobId = reusableVideoSource?.jobId || "";
+  const reusableVisualContextJobId = (
+    reusableVisualContextSource?.jobId
+    && reuseVisualContextInput?.checked
+    && visualSceneContextInput?.checked
+  ) ? reusableVisualContextSource.jobId : "";
   const visionEnabled = Boolean(
     adaptiveVisionInput?.checked || visualSceneContextInput?.checked
   );
-  if (visionEnabled && !videoFile) {
+  if (visionEnabled && !videoFile && !localVideoPath && !reusableVideoJobId) {
     alert("Select a source video or turn off the visual features.");
     return;
   }
@@ -2732,8 +2898,28 @@ async function createJob(event) {
     submitButton.disabled = true;
     submitButton.textContent = "Creating Job...";
   }
+  if (reusableVisualContextJobId) {
+    setFormReloadStatus(
+      "Reusing completed visual analysis...",
+      `${reusableVisualContextSource.count} scene guides will be carried into the clean restart; translation begins from line 1.`,
+    );
+  } else if (visionEnabled && videoFile) {
+    setFormReloadStatus(
+      "Uploading source video...",
+      `${formatFileSize(videoFile.size)} must be transferred into the local job workspace before visual analysis begins.`,
+    );
+  }
   data.append("file", file);
-  if (visionEnabled && videoFile) data.append("video_file", videoFile);
+  if (visionEnabled && localVideoPath) {
+    data.append("local_video_path", localVideoPath);
+  } else if (visionEnabled && videoFile) {
+    data.append("video_file", videoFile);
+  } else if (visionEnabled && reusableVideoJobId) {
+    data.append("reuse_video_job_id", reusableVideoJobId);
+  }
+  if (reusableVisualContextJobId) {
+    data.append("reuse_visual_context_job_id", reusableVisualContextJobId);
+  }
   for (const track of referenceTracks) {
     data.append("reference_languages", track.language);
     data.append("reference_files", track.file);
@@ -2748,17 +2934,23 @@ async function createJob(event) {
   }
 
   try {
-    const response = await fetch("/api/jobs", {
-      method: "POST",
-      body: data,
+    const response = await postFormDataWithProgress("/api/jobs", data, (loaded, total) => {
+      if (!submitButton || !videoFile) return;
+      const percent = Math.min(100, Math.round((loaded / total) * 100));
+      submitButton.textContent = percent < 100 ? `Uploading ${percent}%` : "Creating Job...";
     });
     if (!response.ok) {
-      alert(await responseErrorDetail(response, "Could not create job."));
+      const detail = await responseErrorDetail(response, "Could not create job.");
+      setFormReloadStatus("Job was not created.", detail, "warn");
+      alert(detail);
       return;
     }
     rememberLanguageTip(payload.target_language_tips);
     rememberModel(document.getElementById("model")?.value);
     form.reset();
+    reusableVideoSource = null;
+    reusableVisualContextSource = null;
+    reusableVisualContextVideoChanged = false;
     loadSettings();
     clearFormReloadStatus();
     updateSelectedFileLabel();
@@ -2767,7 +2959,9 @@ async function createJob(event) {
     resetReferenceTrackRows();
     await fetchJobs();
   } catch (error) {
-    alert(error?.message || "Could not create job.");
+    const detail = error?.message || "Could not create job.";
+    setFormReloadStatus("Job was not created.", detail, "warn");
+    alert(detail);
   } finally {
     createJobInFlight = false;
     if (submitButton) {
@@ -2850,7 +3044,7 @@ function applyReloadSettings(payload) {
     title: payload?.title ?? settings.title ?? "",
   };
   for (const element of form.elements) {
-    if (!element.id || element.type === "file" || element.tagName === "BUTTON") continue;
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON" || element.dataset.transient === "true") continue;
     if (!(element.id in values)) continue;
     const value = values[element.id];
     if (element.type === "checkbox") {
@@ -2868,6 +3062,10 @@ function applyReloadSettings(payload) {
 
 function resetJobFormFiles() {
   if (form) form.reset();
+  reusableVideoSource = null;
+  reusableVisualContextSource = null;
+  reusableVisualContextVideoChanged = false;
+  updateReusableVisualContextOption();
   resetReferenceTrackRows();
   sourceSubtitleTextStats = null;
 }
@@ -2899,20 +3097,20 @@ async function reloadJobIntoForm(jobId) {
       attachReferenceFileToRow(row, createSrtFile(reference.filename, reference.content || ""));
     }
   }
-  if (payload?.video_file?.available && payload?.video_file?.download_url) {
-    try {
-      const videoResponse = await fetch(payload.video_file.download_url);
-      if (!videoResponse.ok) {
-        warnings.push("The original video could not be fetched back into the form.");
-      } else {
-        const videoBlob = await videoResponse.blob();
-        const videoType = videoBlob.type || "application/octet-stream";
-        const videoFile = new File([videoBlob], payload.video_file.filename || "source-video", { type: videoType });
-        setInputFile(videoFileInput, videoFile);
-      }
-    } catch (_) {
-      warnings.push("The original video could not be fetched back into the form.");
-    }
+  if (payload?.video_file?.available) {
+    reusableVideoSource = {
+      jobId: payload.job_id,
+      filename: payload.video_file.filename || "Stored source video",
+    };
+  }
+  if (payload?.visual_context_available && Number(payload.visual_context_count) > 0) {
+    reusableVisualContextSource = {
+      jobId: payload.job_id,
+      count: Number(payload.visual_context_count),
+    };
+    reusableVisualContextVideoChanged = false;
+    if (reuseVisualContextInput) reuseVisualContextInput.checked = true;
+    updateReusableVisualContextOption();
   }
 
   updateSelectedFileLabel();
@@ -2924,9 +3122,12 @@ async function reloadJobIntoForm(jobId) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   const modeLabel = payload.job_kind === "review" ? "review setup" : "translation setup";
+  const visualReuseDetail = reusableVisualContextSource
+    ? ` ${reusableVisualContextSource.count} completed visual scene guides will be reused.`
+    : "";
   const detail = warnings.length
-    ? `${modeLabel} restored. ${warnings.join(" ")}`
-    : `${modeLabel} restored with the original settings and files. Adjust anything you want, then start a new run.`;
+    ? `${modeLabel} restored.${visualReuseDetail} ${warnings.join(" ")}`
+    : `${modeLabel} restored with the original settings and files.${visualReuseDetail} Adjust anything you want, then start a new run from line 1.`;
   setFormReloadStatus(
     payload.job_kind === "review" ? "Review job loaded back into the console." : "Job loaded back into the console.",
     detail,
@@ -3519,9 +3720,13 @@ dialog?.addEventListener("close", () => {
   }
   editingJobId = null;
 });
-fileInput.addEventListener("change", updateSelectedFileLabel);
+fileInput.addEventListener("change", acceptSelectedSourceFile);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
 videoFileInput?.addEventListener("change", acceptSelectedVideo);
+localVideoPathInput?.addEventListener("input", acceptLocalVideoPath);
+pickLocalVideoBtn?.addEventListener("click", () => void pickLocalVideo());
+dropLocalVideoBtn?.addEventListener("click", () => void dropLocalVideo());
+clearLocalVideoBtn?.addEventListener("click", clearLocalVideo);
 visionEvidencePrev?.addEventListener("click", () => navigateVisionEvidence(-1));
 visionEvidenceNext?.addEventListener("click", () => navigateVisionEvidence(1));
 visionEvidenceDialog?.addEventListener("close", () => {

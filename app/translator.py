@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import platform
@@ -31,6 +32,8 @@ from app.models import (
 from app.srt_utils import chunk_lines
 from app.vision import ExtractedVisualFrame
 
+logger = logging.getLogger(__name__)
+
 try:
     from fast_langdetect import LangDetectConfig, LangDetector
 except Exception:  # pragma: no cover - dependency is optional at import time
@@ -44,7 +47,8 @@ _LANGUAGE_DETECTOR_FAILED = False
 
 _STRICT_RETRY_INSTRUCTION = (
     "Validation warning: previous output may have left lines untranslated or in the source language. "
-    "Translate every line fully into the target language. Do not keep source-language text unless it is a proper name "
+    "Translate every line fully from {{source_language}} into {{target_language}}. "
+    "Do not keep {{source_language}} text unless it is a proper name "
     "or a term explicitly marked to keep in the context glossary. Preserve line order and return all positions. "
     "Each output line must translate only its matching source line. Never pull text from adjacent subtitle lines, "
     "even when a sentence spans multiple subtitles."
@@ -69,20 +73,86 @@ _LANGUAGE_ALIASES = {
     "russian": "ru",
 }
 
+_LANGUAGE_DISPLAY_NAMES = {
+    "ar": "Arabic",
+    "cs": "Czech",
+    "da": "Danish",
+    "de": "German",
+    "el": "Greek",
+    "en": "English",
+    "es": "Spanish",
+    "fi": "Finnish",
+    "fr": "French",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ms": "Malay",
+    "nl": "Dutch",
+    "no": "Norwegian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "pt-br": "Brazilian Portuguese",
+    "pt-pt": "European Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sv": "Swedish",
+    "th": "Thai",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "vi": "Vietnamese",
+    "zh": "Chinese",
+    "zh-cn": "Simplified Chinese",
+    "zh-tw": "Traditional Chinese",
+}
+
+_LANGUAGE_DISPLAY_CODES = {
+    "pt-br": "pt-BR",
+    "pt-pt": "pt-PT",
+    "zh-cn": "zh-CN",
+    "zh-tw": "zh-TW",
+}
+
+_LANGUAGE_NAME_ALIASES = {
+    **{name.casefold(): code for code, name in _LANGUAGE_DISPLAY_NAMES.items()},
+    "brazilian": "pt-br",
+    "portuguese brazil": "pt-br",
+    "portuguese brazilian": "pt-br",
+    "european portuguese": "pt-pt",
+    "portuguese portugal": "pt-pt",
+    "mandarin": "zh",
+}
+
 DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
-    "You are an expert subtitle translator. "
+    "You are an expert subtitle translator from {{source_language}} into {{target_language}}. "
     "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
-    "Return JSON only. Also return a compact state_update for future batches. "
+    "Return JSON only. "
     "Do not explain your reasoning, do not think out loud, and do not include analysis or commentary outside the JSON object. "
     "Use character gender only as a grammar hint and prefer unknown over guessing. "
     "The primary subtitle text is always the canonical source. "
-    "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
-    "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
     "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
     "forward or backward across positions, even if the sentence continues across multiple subtitles. "
-    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible. "
-    "If visual_scene_context is present, treat it as cached factual evidence from ordered video frames for the current scene. "
-    "Use it only when relevant, preserve its stated uncertainties, and prefer the canonical subtitle text when they conflict. "
+    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible."
+)
+
+REFERENCE_EVIDENCE_INSTRUCTION = (
+    "Reference subtitle evidence is present for some lines in {reference_languages}. "
+    "Use it only to resolve meaning that is genuinely ambiguous in the canonical {{source_language}} text. "
+    "Never copy its grammar, word order, register, dialect, punctuation, or omissions into {{target_language}}. "
+    "The reference alignment_confidence measures timing alignment only, not translation authority or linguistic quality. "
+    "Ignore reference evidence when the canonical source is already clear or when the reference conflicts with it."
+)
+
+VISUAL_SCENE_EVIDENCE_INSTRUCTION = (
+    "Visual scene context is present for this batch as cached factual evidence from ordered video frames. "
+    "Use it only when relevant, preserve its stated uncertainties, and prefer the canonical subtitle text when they conflict."
+)
+
+STATE_UPDATE_INSTRUCTION = (
+    "Also return a compact state_update for future batches. "
     "For state_update: premise means the whole movie premise (global story setup), not a scene recap. "
     "Keep premise stable across batches, but correct it when new evidence clearly contradicts earlier assumptions. "
     "You may revise any state_update field when current lines provide stronger evidence that earlier context was wrong. "
@@ -107,7 +177,8 @@ ADAPTIVE_VISION_TRANSLATION_INSTRUCTION = (
 DEFAULT_STRICT_RETRY_PROMPT = _STRICT_RETRY_INSTRUCTION
 
 DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT = (
-    "You are preparing a compact movie subtitle translation card. "
+    "You are preparing a compact movie subtitle translation card from {{source_language}} dialogue "
+    "for later translation into {{target_language}}. "
     "Use only evidence from the provided cleaned subtitle text. "
     "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
     "Do not describe the translation task itself. "
@@ -121,7 +192,8 @@ DEFAULT_INITIAL_CONTEXT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT = (
-    "You are refreshing a compact subtitle translation context card from cleaned subtitle text covering the whole title. "
+    "You are refreshing a compact subtitle translation context card from cleaned {{source_language}} subtitle text "
+    "covering the whole title for later translation into {{target_language}}. "
     "Use the existing card as a base, revise only with evidence from the provided text, and prefer unknown over guessing. "
     "Ignore timestamps, translation instructions, formatting instructions, JSON-related wording, opening-credit boilerplate, and song-only metadata. "
     "Do not describe the translation task itself. "
@@ -135,7 +207,8 @@ DEFAULT_FULL_CONTEXT_REFRESH_SYSTEM_PROMPT = (
 )
 
 DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT = (
-    "You are updating a compact subtitle translation context card. "
+    "You are updating a compact subtitle translation context card from {{source_language}} dialogue "
+    "for later translation into {{target_language}}. "
     "Use the existing card as a base, revise only with evidence from the provided subtitle lines, "
     "and prefer unknown over guessing. "
     "Premise means whole movie premise (global setup), not local scene context. "
@@ -148,13 +221,53 @@ DEFAULT_BATCH_CONTEXT_REFRESH_SYSTEM_PROMPT = (
 )
 
 DEFAULT_LINE_REVISION_SYSTEM_PROMPT = (
-    "You are revising a single subtitle line translation. "
+    "You are revising a single subtitle line from {{source_language}} into {{target_language}}. "
     "Use the source text, current translation, and session context to produce the best final target-language line. "
-    "If reference_subtitles are present, treat them as supporting aligned subtitle references from other languages. "
     "The source_text remains canonical. "
     "Return only JSON. "
     "Do not explain your reasoning."
 )
+
+_LEGACY_DEFAULT_PROMPTS = {
+    "prompt_translation_system": (
+        "You are an expert subtitle translator. "
+        "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
+        "Return JSON only. Also return a compact state_update for future batches. "
+        "Do not explain your reasoning, do not think out loud, and do not include analysis or commentary outside the JSON object. "
+        "Use character gender only as a grammar hint and prefer unknown over guessing. "
+        "The primary subtitle text is always the canonical source. "
+        "If reference_subtitles are present for a line, they are supporting aligned subtitles from other languages. "
+        "Use them to clarify ambiguity, but do not follow them blindly and do not change line count or order because of them. "
+        "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
+        "forward or backward across positions, even if the sentence continues across multiple subtitles. "
+        "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible. "
+        "If visual_scene_context is present, treat it as cached factual evidence from ordered video frames for the current scene. "
+        "Use it only when relevant, preserve its stated uncertainties, and prefer the canonical subtitle text when they conflict. "
+        "For state_update: premise means the whole movie premise (global story setup), not a scene recap. "
+        "Keep premise stable across batches, but correct it when new evidence clearly contradicts earlier assumptions. "
+        "You may revise any state_update field when current lines provide stronger evidence that earlier context was wrong. "
+        "Write all state_update fields in English only. "
+        "Make scene_context specific to the current batch only. "
+        "Keep state_update compact and factual. "
+        "Do not repeat a broad movie synopsis in scene_context if the current lines are about a narrower exchange, location, or action beat."
+    ),
+    "prompt_line_revision_system": (
+        "You are revising a single subtitle line translation. "
+        "Use the source text, current translation, and session context to produce the best final target-language line. "
+        "If reference_subtitles are present, treat them as supporting aligned subtitle references from other languages. "
+        "The source_text remains canonical. "
+        "Return only JSON. "
+        "Do not explain your reasoning."
+    ),
+}
+
+
+def _prompt_fingerprint(value: str) -> str:
+    fingerprint = 2166136261
+    for byte in value.encode("utf-8"):
+        fingerprint ^= byte
+        fingerprint = (fingerprint * 16777619) & 0xFFFFFFFF
+    return f"{fingerprint:08x}"
 
 PROMPT_DEFAULTS = {
     "prompt_translation_system": DEFAULT_TRANSLATION_SYSTEM_PROMPT,
@@ -506,19 +619,121 @@ def _sanitize_context_scalar(value: str) -> str:
     return normalized
 
 
-def _schema_payload(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+def _schema_payload(
+    name: str,
+    schema: dict[str, Any],
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    json_schema = {
+        "name": name,
+        "schema": schema,
+    }
+    if strict:
+        json_schema["strict"] = True
     return {
         "type": "json_schema",
-        "json_schema": {
-            "name": name,
-            "schema": schema,
-        },
+        "json_schema": json_schema,
     }
+
+
+def _is_structured_output_compatibility_error(response: httpx.Response) -> bool:
+    if response.status_code < 400:
+        return False
+    detail = response.text.casefold()
+    return any(
+        marker in detail
+        for marker in (
+            "response_format",
+            "json_schema",
+            "json schema",
+            "structured output",
+            "structured-output",
+            "unknown field: strict",
+            "unknown parameter: strict",
+            "extra inputs are not permitted",
+        )
+    )
+
+
+def _language_prompt_label(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Unknown language"
+    normalized = raw.replace("_", "-").strip().casefold()
+    code = normalized if normalized in _LANGUAGE_DISPLAY_NAMES else _LANGUAGE_NAME_ALIASES.get(normalized)
+    if code is None:
+        alias_code = _LANGUAGE_ALIASES.get(normalized)
+        if alias_code:
+            code = "pt-br" if normalized in {"brazilian portuguese", "pt-br"} else alias_code
+    if code and code in _LANGUAGE_DISPLAY_NAMES:
+        display_code = _LANGUAGE_DISPLAY_CODES.get(code, code)
+        return f"{_LANGUAGE_DISPLAY_NAMES[code]} ({display_code})"
+    return raw
+
+
+def _prompt_template_variables(settings: TranslationSettings) -> dict[str, str]:
+    return {
+        "source_language": _language_prompt_label(settings.source_language),
+        "target_language": _language_prompt_label(settings.target_language),
+        "source_language_code": str(settings.source_language or "").strip(),
+        "target_language_code": str(settings.target_language or "").strip(),
+        "title": str(settings.title or "").strip(),
+    }
+
+
+def _language_prompt_payload(settings: TranslationSettings) -> dict[str, str]:
+    return {
+        "source_language": _language_prompt_label(settings.source_language),
+        "source_language_code": str(settings.source_language or "").strip(),
+        "target_language": _language_prompt_label(settings.target_language),
+        "target_language_code": str(settings.target_language or "").strip(),
+    }
+
+
+def _render_prompt_template(template: str, settings: TranslationSettings) -> str:
+    rendered = str(template or "")
+    for name, value in _prompt_template_variables(settings).items():
+        rendered = rendered.replace(f"{{{{{name}}}}}", value)
+    return rendered.strip()
 
 
 def _effective_prompt(settings: TranslationSettings, field_name: str, default_value: str) -> str:
     override = str(getattr(settings, field_name, "") or "").strip()
-    return override or default_value
+    if override == _LEGACY_DEFAULT_PROMPTS.get(field_name):
+        override = ""
+    rendered = _render_prompt_template(override or default_value, settings)
+    variables = _prompt_template_variables(settings)
+    source_label = variables["source_language"]
+    target_label = variables["target_language"]
+    if source_label not in rendered or target_label not in rendered:
+        rendered = f"Language task: {source_label} -> {target_label}. {rendered}"
+    return rendered
+
+
+def _reference_language_labels(
+    reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None,
+) -> list[str]:
+    labels = {
+        _language_prompt_label(str(reference.get("language") or ""))
+        for references in (reference_subtitles_by_position or {}).values()
+        for reference in references
+        if str(reference.get("language") or "").strip()
+    }
+    return sorted(labels)
+
+
+def _dynamic_reference_instruction(
+    settings: TranslationSettings,
+    reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None,
+) -> str:
+    has_references = any(reference_subtitles_by_position.values()) if reference_subtitles_by_position else False
+    if not has_references:
+        return ""
+    labels = _reference_language_labels(reference_subtitles_by_position)
+    reference_languages = ", ".join(labels) if labels else "an unspecified reference language"
+    template = REFERENCE_EVIDENCE_INSTRUCTION.replace("{reference_languages}", reference_languages)
+    return _render_prompt_template(template, settings)
 
 
 def _effective_timeout_seconds(settings: TranslationSettings) -> int:
@@ -530,7 +745,10 @@ def _effective_max_completion_tokens(settings: TranslationSettings) -> int:
 
 
 def _target_language_tips(settings: TranslationSettings) -> str:
-    return str(getattr(settings, "target_language_tips", "") or "").strip()
+    return _render_prompt_template(
+        str(getattr(settings, "target_language_tips", "") or ""),
+        settings,
+    )
 
 
 def _with_target_language_tips(system_instruction: str, settings: TranslationSettings) -> str:
@@ -608,8 +826,8 @@ def _session_context_schema() -> dict[str, Any]:
     }
 
 
-def _translation_schema() -> dict[str, Any]:
-    return {
+def _translation_schema(*, include_state_update: bool = True) -> dict[str, Any]:
+    schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -626,14 +844,17 @@ def _translation_schema() -> dict[str, Any]:
                     "required": ["position", "text"],
                 },
             },
-            "state_update": _session_context_schema(),
         },
-        "required": ["translations", "state_update"],
+        "required": ["translations"],
     }
+    if include_state_update:
+        schema["properties"]["state_update"] = _session_context_schema()
+        schema["required"].append("state_update")
+    return schema
 
 
-def _adaptive_translation_schema() -> dict[str, Any]:
-    schema = _translation_schema()
+def _adaptive_translation_schema(*, include_state_update: bool = True) -> dict[str, Any]:
+    schema = _translation_schema(include_state_update=include_state_update)
     schema["properties"]["visual_doubts"] = {
         "type": "array",
         "maxItems": 3,
@@ -1202,6 +1423,10 @@ class OpenAICompatibleTranslator:
             "max_completion_tokens": DEFAULT_MAX_COMPLETION_TOKENS,
             "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             **PROMPT_DEFAULTS,
+            "legacy_prompt_fingerprints": {
+                field_name: _prompt_fingerprint(prompt)
+                for field_name, prompt in _LEGACY_DEFAULT_PROMPTS.items()
+            },
         }
 
     def _detect_wsl_host_ip(self) -> str | None:
@@ -1372,14 +1597,14 @@ class OpenAICompatibleTranslator:
         messages: list[dict[str, Any]],
         schema_name: str,
         schema: dict[str, Any],
+        log_event: LogEvent | None = None,
     ) -> dict[str, Any]:
         timeout_seconds = _effective_timeout_seconds(settings)
-        payload = {
+        base_payload = {
             "model": settings.model,
             "messages": messages,
             "temperature": settings.temperature,
             "max_tokens": _effective_max_completion_tokens(settings),
-            "response_format": _schema_payload(schema_name, schema),
         }
         headers = {
             "Content-Type": "application/json",
@@ -1391,17 +1616,42 @@ class OpenAICompatibleTranslator:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
             for url in candidates:
                 try:
-                    response = await client.post(url + "/chat/completions", json=payload, headers=headers)
-                    if response.status_code >= 400:
-                        detail = response.text
-                        if "response_format.type" in detail or "json_schema" in detail:
-                            fallback_payload = dict(payload)
-                            fallback_payload.pop("response_format", None)
-                            response = await client.post(url + "/chat/completions", json=fallback_payload, headers=headers)
+                    request_modes = (
+                        (
+                            "strict JSON schema",
+                            {**base_payload, "response_format": _schema_payload(schema_name, schema)},
+                        ),
+                        (
+                            "JSON schema without strict enforcement",
+                            {
+                                **base_payload,
+                                "response_format": _schema_payload(schema_name, schema, strict=False),
+                            },
+                        ),
+                        ("prompt-only JSON", base_payload),
+                    )
+                    for mode_index, (mode_name, request_payload) in enumerate(request_modes):
+                        response = await client.post(
+                            url + "/chat/completions",
+                            json=request_payload,
+                            headers=headers,
+                        )
+                        if response.status_code >= 400:
+                            can_fallback = (
+                                mode_index < len(request_modes) - 1
+                                and _is_structured_output_compatibility_error(response)
+                            )
+                            if can_fallback:
+                                continue
                             response.raise_for_status()
-                            return _extract_json_blob(_extract_message_text(response.json()))
-                        response.raise_for_status()
-                    return _extract_json_blob(_extract_message_text(response.json()))
+
+                        level = "info" if mode_index == 0 else "warn"
+                        message = f"Model response mode for {schema_name}: {mode_name}"
+                        if log_event:
+                            log_event(level, message)
+                        else:
+                            getattr(logger, "warning" if level == "warn" else "info")(message)
+                        return _extract_json_blob(_extract_message_text(response.json()))
                 except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                     last_error = exc
                     continue
@@ -1417,6 +1667,7 @@ class OpenAICompatibleTranslator:
         self,
         settings: TranslationSettings,
         lines: list[SubtitleLine],
+        log_event: LogEvent | None = None,
     ) -> SessionContext:
         subtitle_payload = _build_full_subtitle_card_payload(settings, lines)
         messages = [
@@ -1432,8 +1683,7 @@ class OpenAICompatibleTranslator:
                 "content": json.dumps(
                     {
                         "title": settings.title,
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
+                        **_language_prompt_payload(settings),
                         "initial_card_strategy_requested": subtitle_payload["requested_strategy"],
                         "initial_card_strategy_used": subtitle_payload["strategy_used"],
                         "full_text_char_count": subtitle_payload["full_text_char_count"],
@@ -1445,7 +1695,13 @@ class OpenAICompatibleTranslator:
                 ),
             },
         ]
-        data = await self._chat_json(settings, messages, "session_context", _session_context_schema())
+        data = await self._chat_json(
+            settings,
+            messages,
+            "session_context",
+            _session_context_schema(),
+            log_event=log_event,
+        )
         merged = merge_session_context(
             SessionContext(
                 movie_title=settings.title,
@@ -1520,6 +1776,7 @@ class OpenAICompatibleTranslator:
             messages,
             "visual_scene_context",
             _visual_scene_context_schema(),
+            log_event=log_event,
         )
         return VisualSceneContext(
             scene_index=scene_index,
@@ -1536,6 +1793,7 @@ class OpenAICompatibleTranslator:
         settings: TranslationSettings,
         lines: list[SubtitleLine],
         base_context: SessionContext | None = None,
+        log_event: LogEvent | None = None,
     ) -> SessionContext:
         subtitle_payload = _build_full_subtitle_card_payload(settings, lines)
         base = deepcopy(base_context) if base_context else SessionContext(
@@ -1560,8 +1818,7 @@ class OpenAICompatibleTranslator:
                 "content": json.dumps(
                     {
                         "title": settings.title,
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
+                        **_language_prompt_payload(settings),
                         "scope": "full subtitle file",
                         "existing_context": base.model_dump(),
                         "initial_card_strategy_requested": subtitle_payload["requested_strategy"],
@@ -1575,7 +1832,13 @@ class OpenAICompatibleTranslator:
                 ),
             },
         ]
-        data = await self._chat_json(settings, messages, "session_context_refresh", _session_context_schema())
+        data = await self._chat_json(
+            settings,
+            messages,
+            "session_context_refresh",
+            _session_context_schema(),
+            log_event=log_event,
+        )
         return merge_session_context(base, data)
 
     async def generate_context_from_lines(
@@ -1585,6 +1848,7 @@ class OpenAICompatibleTranslator:
         base_context: SessionContext | None = None,
         scope_label: str = "batch",
         max_lines: int = 120,
+        log_event: LogEvent | None = None,
     ) -> SessionContext:
         snippet = [{"position": line.position, "text": line.text} for line in lines[:max_lines]]
         base = deepcopy(base_context) if base_context else SessionContext(
@@ -1609,8 +1873,7 @@ class OpenAICompatibleTranslator:
                 "content": json.dumps(
                     {
                         "title": settings.title,
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
+                        **_language_prompt_payload(settings),
                         "scope": scope_label,
                         "existing_context": base.model_dump(),
                         "lines": snippet,
@@ -1619,7 +1882,13 @@ class OpenAICompatibleTranslator:
                 ),
             },
         ]
-        data = await self._chat_json(settings, messages, "session_context_refresh", _session_context_schema())
+        data = await self._chat_json(
+            settings,
+            messages,
+            "session_context_refresh",
+            _session_context_schema(),
+            log_event=log_event,
+        )
         return merge_session_context(base, data)
 
     async def validate_existing_translation(
@@ -1726,17 +1995,6 @@ class OpenAICompatibleTranslator:
         extra_instruction: str = "",
         log_event: LogEvent | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, list[VisualDoubt]]:
-        system_instruction = _with_target_language_tips(
-            _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT),
-            settings,
-        )
-        if allow_visual_doubts:
-            system_instruction += " " + ADAPTIVE_VISION_TRANSLATION_INSTRUCTION.format(
-                max_doubts=min(3, int(getattr(settings, "vision_max_doubts", 3) or 3)),
-            )
-        if extra_instruction:
-            system_instruction += " " + extra_instruction
-
         context_payload = session_context.model_dump() if session_context else {}
         line_payload = []
         reference_count = 0
@@ -1753,16 +2011,42 @@ class OpenAICompatibleTranslator:
                 reference_count += len(references)
                 item["reference_subtitles"] = references
             line_payload.append(item)
-        user_payload = {
+        active_prompt_blocks: list[str] = []
+        instruction_parts = [
+            _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT)
+        ]
+        if settings.structured_context:
+            instruction_parts.append(_render_prompt_template(STATE_UPDATE_INSTRUCTION, settings))
+            active_prompt_blocks.append("rolling context")
+        reference_instruction = _dynamic_reference_instruction(settings, reference_subtitles_by_position)
+        if reference_instruction:
+            instruction_parts.append(reference_instruction)
+            active_prompt_blocks.append("reference evidence")
+        if visual_scene_contexts:
+            instruction_parts.append(_render_prompt_template(VISUAL_SCENE_EVIDENCE_INSTRUCTION, settings))
+            active_prompt_blocks.append("scene evidence")
+        if allow_visual_doubts:
+            instruction_parts.append(
+                ADAPTIVE_VISION_TRANSLATION_INSTRUCTION.format(
+                    max_doubts=min(3, int(getattr(settings, "vision_max_doubts", 3) or 3)),
+                )
+            )
+            active_prompt_blocks.append("visual doubts")
+        if extra_instruction:
+            instruction_parts.append(_render_prompt_template(extra_instruction, settings))
+            active_prompt_blocks.append("strict retry")
+        system_instruction = _with_target_language_tips(" ".join(instruction_parts), settings)
+        user_payload: dict[str, Any] = {
             "title": settings.title,
-            "source_language": settings.source_language,
-            "target_language": settings.target_language,
-            "session_context": context_payload,
-            "visual_scene_context": [
-                item.model_dump() for item in (visual_scene_contexts or [])
-            ],
+            **_language_prompt_payload(settings),
             "lines": line_payload,
         }
+        if settings.structured_context:
+            user_payload["session_context"] = context_payload
+        if visual_scene_contexts:
+            user_payload["visual_scene_context"] = [
+                item.model_dump() for item in visual_scene_contexts
+            ]
         messages = [
             {
                 "role": "system",
@@ -1793,13 +2077,19 @@ class OpenAICompatibleTranslator:
                         "refs": _json_for_prompt_size(references_payload) if reference_count else "",
                     },
                 )
-                + f"; {len(batch_lines)} source line(s), {reference_count} reference match(es)",
+                + f"; {len(batch_lines)} source line(s), {reference_count} reference match(es)"
+                + f"; active prompt blocks: {', '.join(active_prompt_blocks) if active_prompt_blocks else 'base only'}",
             )
         data = await self._chat_json(
             settings,
             messages,
             "adaptive_translation_batch" if allow_visual_doubts else "translation_batch",
-            _adaptive_translation_schema() if allow_visual_doubts else _translation_schema(),
+            (
+                _adaptive_translation_schema(include_state_update=settings.structured_context)
+                if allow_visual_doubts
+                else _translation_schema(include_state_update=settings.structured_context)
+            ),
+            log_event=log_event,
         )
         translations = [
             SubtitleLine(position=int(item["position"]), text=str(item["text"]))
@@ -1885,8 +2175,7 @@ class OpenAICompatibleTranslator:
                 "For speaker gender or identity, use low confidence or inconclusive unless the visible sequence strongly links "
                 "the person to the subtitle."
             ),
-            "source_language": settings.source_language,
-            "target_language": settings.target_language,
+            **_language_prompt_payload(settings),
             "session_context": session_context.model_dump() if session_context else {},
             "doubtful_lines": doubtful_lines,
             "dialogue_context": dialogue_context,
@@ -1927,6 +2216,7 @@ class OpenAICompatibleTranslator:
             messages,
             "visual_subtitle_clarification",
             _visual_clarification_schema(),
+            log_event=log_event,
         )
 
         observations: list[VisualObservation] = []
@@ -1989,12 +2279,29 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
     ) -> tuple[SubtitleLine, BatchProcessingStats]:
-        system_instruction = _with_target_language_tips(
-            _effective_prompt(settings, "prompt_line_revision_system", DEFAULT_LINE_REVISION_SYSTEM_PROMPT),
+        instruction_parts = [
+            _effective_prompt(settings, "prompt_line_revision_system", DEFAULT_LINE_REVISION_SYSTEM_PROMPT)
+        ]
+        reference_instruction = _dynamic_reference_instruction(
             settings,
+            {source_line.position: reference_subtitles or []},
         )
+        if reference_instruction:
+            instruction_parts.append(reference_instruction)
         if extra_instruction.strip():
-            system_instruction += " Additional instruction: " + extra_instruction.strip()
+            instruction_parts.append(
+                "Additional instruction: "
+                + _render_prompt_template(extra_instruction.strip(), settings)
+            )
+        system_instruction = _with_target_language_tips(" ".join(instruction_parts), settings)
+
+        line_payload: dict[str, Any] = {
+            "position": source_line.position,
+            "source_text": source_line.text,
+            "current_translation": current_translation.text if current_translation else "",
+        }
+        if reference_subtitles:
+            line_payload["reference_subtitles"] = reference_subtitles
 
         messages = [
             {
@@ -2006,15 +2313,9 @@ class OpenAICompatibleTranslator:
                 "content": json.dumps(
                     {
                         "title": settings.title,
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
+                        **_language_prompt_payload(settings),
                         "session_context": session_context.model_dump() if session_context else {},
-                        "line": {
-                            "position": source_line.position,
-                            "source_text": source_line.text,
-                            "current_translation": current_translation.text if current_translation else "",
-                            "reference_subtitles": reference_subtitles or [],
-                        },
+                        "line": line_payload,
                     },
                     ensure_ascii=False,
                 ),
@@ -2022,7 +2323,13 @@ class OpenAICompatibleTranslator:
         ]
         if log_event:
             log_event("info", f"Submitting isolated revision request for line {source_line.position + 1}")
-        data = await self._chat_json(settings, messages, "subtitle_line_revision", _single_line_revision_schema())
+        data = await self._chat_json(
+            settings,
+            messages,
+            "subtitle_line_revision",
+            _single_line_revision_schema(),
+            log_event=log_event,
+        )
         revised_line = SubtitleLine(position=source_line.position, text=str(data.get("text", "")))
         validation = _validate_translated_batch(settings, [source_line], [revised_line], session_context)
         flagged_positions = _flagged_positions(validation, [source_line], settings)
@@ -2200,36 +2507,44 @@ class OpenAICompatibleTranslator:
             if abs(line.position - source_line.position) <= 1
             and line.position != source_line.position
         ]
-        system_instruction = _with_target_language_tips(
-            (
-                "Translate one subtitle line into the target language. "
+        instruction_parts = [
+            _render_prompt_template(
+                "Translate one subtitle line from {{source_language}} into {{target_language}}. "
                 "Return only JSON with the final text. Preserve proper names unchanged when appropriate. "
                 "Use nearby_lines only as context. Translate only the target line and do not pull text from adjacent subtitle positions. "
-                "Do not update context or explain your reasoning. "
-                + _effective_prompt(
-                    settings,
-                    "prompt_translation_strict_retry",
-                    DEFAULT_STRICT_RETRY_PROMPT,
-                )
+                "Do not update context or explain your reasoning.",
+                settings,
             ),
+            _effective_prompt(
+                settings,
+                "prompt_translation_strict_retry",
+                DEFAULT_STRICT_RETRY_PROMPT,
+            ),
+        ]
+        reference_instruction = _dynamic_reference_instruction(
             settings,
+            {source_line.position: reference_subtitles},
         )
+        if reference_instruction:
+            instruction_parts.append(reference_instruction)
+        system_instruction = _with_target_language_tips(" ".join(instruction_parts), settings)
+        line_payload: dict[str, Any] = {
+            "position": source_line.position,
+            "source_text": source_line.text,
+            "current_translation": current_translation.text if current_translation else "",
+        }
+        if reference_subtitles:
+            line_payload["reference_subtitles"] = reference_subtitles
         messages = [
             {"role": "system", "content": system_instruction},
             {
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "source_language": settings.source_language,
-                        "target_language": settings.target_language,
+                        **_language_prompt_payload(settings),
                         "context": compact_context,
                         "nearby_lines": nearby,
-                        "line": {
-                            "position": source_line.position,
-                            "source_text": source_line.text,
-                            "current_translation": current_translation.text if current_translation else "",
-                            "reference_subtitles": reference_subtitles,
-                        },
+                        "line": line_payload,
                     },
                     ensure_ascii=False,
                 ),
@@ -2252,6 +2567,7 @@ class OpenAICompatibleTranslator:
             messages,
             "subtitle_line_retry",
             _single_line_revision_schema(),
+            log_event=log_event,
         )
         return SubtitleLine(
             position=source_line.position,

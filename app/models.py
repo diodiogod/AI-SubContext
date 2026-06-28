@@ -213,6 +213,7 @@ class TranslationJob(BaseModel):
     reference_uploads: list[StoredReferenceUpload] = Field(default_factory=list)
     video_filename: str = ""
     video_path: str = ""
+    video_managed: bool = True
     session_context: SessionContext | None = None
     session_context_history: list[dict[str, Any]] = Field(default_factory=list)
     batch_context_snapshots: list[BatchContextSnapshot] = Field(default_factory=list)
@@ -277,7 +278,6 @@ class ReloadJobReferenceFile(BaseModel):
 class ReloadJobVideo(BaseModel):
     filename: str = ""
     available: bool = False
-    download_url: str = ""
 
 
 class ReloadJobResponse(BaseModel):
@@ -289,6 +289,8 @@ class ReloadJobResponse(BaseModel):
     translated_file: ReloadJobFile | None = None
     reference_files: list[ReloadJobReferenceFile] = Field(default_factory=list)
     video_file: ReloadJobVideo = Field(default_factory=ReloadJobVideo)
+    visual_context_available: bool = False
+    visual_context_count: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -315,6 +317,7 @@ class RuntimeDefaultsResponse(BaseModel):
     prompt_full_context_refresh_system: str
     prompt_batch_context_refresh_system: str
     prompt_line_revision_system: str
+    legacy_prompt_fingerprints: dict[str, str] = Field(default_factory=dict)
 
 
 class UpdateContextRequest(BaseModel):

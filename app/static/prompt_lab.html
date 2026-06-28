@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260510-5" />
+    <link rel="stylesheet" href="/static/app.css?v=20260628-1" />
   </head>
   <body>
     <main class="shell review-shell">
@@ -59,6 +59,35 @@
           <div class="section-head">
             <div class="mini-eyebrow">Prompt Templates</div>
           </div>
+          <div class="prompt-template-guide">
+            <div class="prompt-template-copy">
+              <strong>Language-aware templates</strong>
+              <span>Insert a variable into the active prompt. It is replaced when a job runs, for example <code>pt-BR</code> becomes <code>Brazilian Portuguese (pt-BR)</code>.</span>
+            </div>
+            <div class="prompt-variable-list" aria-label="Prompt template variables">
+              <button type="button" class="prompt-variable-chip" data-prompt-variable="{{source_language}}">Source language</button>
+              <button type="button" class="prompt-variable-chip" data-prompt-variable="{{target_language}}">Target language</button>
+              <button type="button" class="prompt-variable-chip" data-prompt-variable="{{source_language_code}}">Source code</button>
+              <button type="button" class="prompt-variable-chip" data-prompt-variable="{{target_language_code}}">Target code</button>
+              <button type="button" class="prompt-variable-chip" data-prompt-variable="{{title}}">Title</button>
+            </div>
+            <div class="prompt-variable-preview" aria-live="polite">
+              <span>Variables</span>
+              <code id="prompt-variable-preview">Select a chip to insert it at the cursor.</code>
+            </div>
+          </div>
+          <div class="prompt-auto-blocks">
+            <div>
+              <strong>Added only when active</strong>
+              <span>The app attaches feature guidance to your base prompt at runtime. You do not need to duplicate it here.</span>
+            </div>
+            <ul>
+              <li><b>Reference evidence</b> when aligned reference lines exist in that batch</li>
+              <li><b>Scene evidence</b> when the batch overlaps a visual scene guide</li>
+              <li><b>Visual doubts</b> when adaptive visual clarification is enabled</li>
+              <li><b>Rolling card</b> when structured context is enabled</li>
+            </ul>
+          </div>
           <div class="field-grid field-grid-prompt-lab">
             <label class="field-span-full">
               <span class="label-row">Batch Translation Prompt <span class="info-dot" title="Main system prompt for normal translation batches. This is the strongest tuning point.">?</span></span>
@@ -93,6 +122,6 @@
       </section>
     </main>
 
-    <script src="/static/prompt_lab.js?v=20260510-2"></script>
+    <script src="/static/prompt_lab.js?v=20260628-1"></script>
   </body>
 </html>

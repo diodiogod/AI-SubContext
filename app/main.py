@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from mimetypes import guess_type
+import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.config import TranslationSettings
-from app.job_manager import DuplicateActiveJobError, job_manager
+from app.job_manager import DuplicateActiveJobError, VisualContextReuseError, job_manager
 from app.models import (
     CreateJobResponse,
     GenerateContextResponse,
@@ -34,6 +36,94 @@ from app.version import __version__
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
+
+_WINDOWS_VIDEO_DROP_SCRIPT = r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$allowed = @('.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.ts')
+$selected = ''
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Drop Video Without Copying'
+$form.ClientSize = New-Object System.Drawing.Size(560, 250)
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.AllowDrop = $true
+$form.BackColor = [System.Drawing.Color]::FromArgb(8, 20, 27)
+$form.ForeColor = [System.Drawing.Color]::FromArgb(229, 244, 242)
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.KeyPreview = $true
+
+$title = New-Object System.Windows.Forms.Label
+$title.Text = 'Drop a video from Explorer'
+$title.Font = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Bold)
+$title.AutoSize = $true
+$title.Location = New-Object System.Drawing.Point(34, 34)
+$form.Controls.Add($title)
+
+$message = New-Object System.Windows.Forms.Label
+$message.Text = "The original file stays where it is.`r`nNothing will be uploaded, copied, moved, or deleted."
+$message.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$message.AutoSize = $true
+$message.Location = New-Object System.Drawing.Point(37, 87)
+$message.ForeColor = [System.Drawing.Color]::FromArgb(155, 190, 186)
+$form.Controls.Add($message)
+
+$status = New-Object System.Windows.Forms.Label
+$status.Text = 'Waiting for MP4, MKV, WebM, MOV, AVI, M4V, or TS...'
+$status.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$status.AutoSize = $true
+$status.Location = New-Object System.Drawing.Point(37, 158)
+$status.ForeColor = [System.Drawing.Color]::FromArgb(120, 230, 222)
+$form.Controls.Add($status)
+
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = 'Cancel'
+$cancel.Size = New-Object System.Drawing.Size(82, 32)
+$cancel.Location = New-Object System.Drawing.Point(438, 188)
+$cancel.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cancel.Add_Click({ $form.Close() })
+$form.Controls.Add($cancel)
+
+$form.Add_DragEnter({
+    if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
+        $files = [string[]]$_.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+        $extension = [System.IO.Path]::GetExtension($files[0]).ToLowerInvariant()
+        if ($allowed -contains $extension) {
+            $_.Effect = [System.Windows.Forms.DragDropEffects]::Link
+            $status.Text = 'Release to use this original file without copying.'
+            return
+        }
+    }
+    $_.Effect = [System.Windows.Forms.DragDropEffects]::None
+    $status.Text = 'That is not a supported video file.'
+})
+$form.Add_DragLeave({
+    $status.Text = 'Waiting for MP4, MKV, WebM, MOV, AVI, M4V, or TS...'
+})
+$form.Add_DragDrop({
+    $files = [string[]]$_.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+    if ($files.Count -gt 0) {
+        $extension = [System.IO.Path]::GetExtension($files[0]).ToLowerInvariant()
+        if ($allowed -contains $extension) {
+            $script:selected = $files[0]
+            $form.Close()
+        }
+    }
+})
+$form.Add_KeyDown({
+    if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() }
+})
+$form.Add_Shown({ $form.Activate() })
+[void]$form.ShowDialog()
+
+if ($selected) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $selected
+}
+'''
 
 app = FastAPI(title="AI SubContext", version=__version__)
 app.add_middleware(
@@ -89,32 +179,10 @@ async def get_job(job_id: str) -> dict:
 
 @app.get("/api/jobs/{job_id}/reload", response_model=ReloadJobResponse)
 async def get_job_reload(job_id: str) -> ReloadJobResponse:
-    payload = job_manager.build_reload_payload(
-        job_id,
-        video_download_url=f"/api/jobs/{job_id}/reload/video",
-    )
+    payload = job_manager.build_reload_payload(job_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return payload
-
-
-@app.get("/api/jobs/{job_id}/reload/video")
-async def get_job_reload_video(job_id: str) -> FileResponse:
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if not job.video_filename or not job.video_path:
-        raise HTTPException(status_code=404, detail="Job video is not available")
-    video_path = Path(job.video_path)
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Job video is not available")
-    media_type = guess_type(job.video_filename)[0] or "application/octet-stream"
-    return FileResponse(
-        video_path,
-        media_type=media_type,
-        filename=job.video_filename,
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
 
 
 @app.get("/api/jobs/{job_id}/vision/frames/{frame_id}")
@@ -178,16 +246,6 @@ async def _save_video_upload(upload: UploadFile) -> str:
         with destination.open("wb") as output:
             while chunk := await upload.read(1024 * 1024):
                 output.write(chunk)
-    except DuplicateActiveJobError as exc:
-        if video_path:
-            Path(video_path).unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"This subtitle is already being translated by active job {exc.job.id} "
-                f"at batch {exc.job.current_batch}/{exc.job.total_batches or '?'}."
-            ),
-        ) from exc
     except Exception:
         destination.unlink(missing_ok=True)
         raise
@@ -197,10 +255,159 @@ async def _save_video_upload(upload: UploadFile) -> str:
     return str(destination)
 
 
+def _resolve_local_video_path(raw_path: str) -> Path:
+    cleaned = str(raw_path or "").strip().strip('"')
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Choose a local video or upload a copy")
+    candidate = Path(os.path.expandvars(cleaned)).expanduser()
+    if not candidate.is_absolute():
+        raise HTTPException(status_code=400, detail="The local video path must be absolute")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="The selected local video is no longer available") from exc
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise HTTPException(status_code=400, detail="The selected local video is empty or unavailable")
+    if resolved.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported video format. Use MP4, MKV, WebM, MOV, AVI, M4V, or TS.",
+        )
+    return resolved
+
+
+def _open_local_video_picker() -> str:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+        return str(
+            filedialog.askopenfilename(
+                parent=root,
+                title="Choose source video for vision",
+                filetypes=[
+                    ("Video files", "*.mp4 *.mkv *.webm *.mov *.avi *.m4v *.ts"),
+                    ("All files", "*.*"),
+                ],
+            )
+            or ""
+        )
+    finally:
+        root.destroy()
+
+
+def _open_local_video_drop_target() -> str:
+    if os.name != "nt":
+        raise RuntimeError("Native video drop is available only when the app runs on Windows")
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-STA",
+            "-Command",
+            _WINDOWS_VIDEO_DROP_SCRIPT,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        creationflags=creation_flags,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Native video drop window failed")
+    return result.stdout.strip().lstrip("\ufeff")
+
+
+def _require_local_app_origin(request: Request) -> None:
+    origin = request.headers.get("origin", "").strip()
+    if origin and urlparse(origin).netloc != request.headers.get("host", ""):
+        raise HTTPException(status_code=403, detail="Local video selection requires the app page")
+
+
+@app.post("/api/local-video/pick")
+async def pick_local_video(request: Request) -> dict[str, str | bool]:
+    _require_local_app_origin(request)
+    try:
+        selected = await asyncio.to_thread(_open_local_video_picker)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The native video picker is unavailable. Paste the full local path instead.",
+        ) from exc
+    if not selected:
+        return {"cancelled": True, "path": "", "filename": ""}
+    video_path = _resolve_local_video_path(selected)
+    return {
+        "cancelled": False,
+        "path": str(video_path),
+        "filename": video_path.name,
+    }
+
+
+@app.post("/api/local-video/drop")
+async def drop_local_video(request: Request) -> dict[str, str | bool]:
+    _require_local_app_origin(request)
+    try:
+        selected = await asyncio.to_thread(_open_local_video_drop_target)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The native drop window is unavailable. Use Choose Video or paste the full local path instead.",
+        ) from exc
+    if not selected:
+        return {"cancelled": True, "path": "", "filename": ""}
+    video_path = _resolve_local_video_path(selected)
+    return {
+        "cancelled": False,
+        "path": str(video_path),
+        "filename": video_path.name,
+    }
+
+
+def _reuse_job_video(job_id: str) -> tuple[str, str, bool]:
+    source_job = job_manager.get_job(job_id)
+    if not source_job or not source_job.video_path or not source_job.video_filename:
+        raise HTTPException(status_code=400, detail="The stored source video is no longer available")
+
+    source = Path(source_job.video_path).resolve()
+    video_dir = job_manager.video_dir.resolve()
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="The stored source video is no longer available")
+
+    suffix = source.suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="The stored source video format is unsupported")
+
+    if not source_job.video_managed:
+        return str(source), source_job.video_filename, False
+
+    if source.parent != video_dir:
+        raise HTTPException(status_code=400, detail="The stored source video is no longer available")
+
+    destination = video_dir / f"{uuid4().hex}{suffix}"
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail="The stored video could not be reused. Select the video file manually and retry.",
+        ) from exc
+    return str(destination), source_job.video_filename, True
+
+
 @app.post("/api/jobs", response_model=CreateJobResponse)
 async def create_job(
     file: UploadFile = File(...),
     video_file: UploadFile | None = File(default=None),
+    local_video_path: str = Form(default=""),
+    reuse_video_job_id: str = Form(default=""),
+    reuse_visual_context_job_id: str = Form(default=""),
     reference_files: list[UploadFile] | None = File(default=None),
     reference_languages: list[str] | None = Form(default=None),
     title: str = Form(default=""),
@@ -268,13 +475,26 @@ async def create_job(
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
     vision_enabled = adaptive_vision or visual_scene_context
-    if vision_enabled and not (video_file and video_file.filename):
+    has_video_upload = bool(video_file and video_file.filename)
+    has_local_video = bool(local_video_path.strip())
+    has_reusable_video = bool(reuse_video_job_id.strip())
+    if vision_enabled and not (has_video_upload or has_local_video or has_reusable_video):
         raise HTTPException(status_code=400, detail="Visual features require a video file")
 
     reference_sources = await _read_reference_sources(reference_files, reference_languages)
     video_path = ""
-    if vision_enabled and video_file and video_file.filename:
+    video_filename = ""
+    video_managed = False
+    if vision_enabled and has_local_video:
+        selected_video = _resolve_local_video_path(local_video_path)
+        video_path = str(selected_video)
+        video_filename = selected_video.name
+    elif vision_enabled and has_video_upload and video_file:
         video_path = await _save_video_upload(video_file)
+        video_filename = str(video_file.filename or "")
+        video_managed = True
+    elif vision_enabled and has_reusable_video:
+        video_path, video_filename, video_managed = _reuse_job_video(reuse_video_job_id.strip())
     try:
         job = job_manager.create_job(
             filename=file.filename,
@@ -282,11 +502,27 @@ async def create_job(
             original_srt=content,
             settings=settings,
             reference_sources=reference_sources,
-            video_filename=str(video_file.filename or "") if vision_enabled and video_file else "",
+            video_filename=video_filename,
             video_path=video_path,
+            video_managed=video_managed,
+            reuse_visual_context_job_id=reuse_visual_context_job_id.strip(),
         )
+    except DuplicateActiveJobError as exc:
+        if video_path and video_managed:
+            Path(video_path).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This subtitle is already being translated by active job {exc.job.id} "
+                f"at batch {exc.job.current_batch}/{exc.job.total_batches or '?'}."
+            ),
+        ) from exc
+    except VisualContextReuseError as exc:
+        if video_path and video_managed:
+            Path(video_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
-        if video_path:
+        if video_path and video_managed:
             Path(video_path).unlink(missing_ok=True)
         raise
     return CreateJobResponse(job_id=job.id)

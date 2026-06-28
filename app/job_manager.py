@@ -52,6 +52,10 @@ class DuplicateActiveJobError(RuntimeError):
         super().__init__(f"An active job already exists for this subtitle: {job.id}")
 
 
+class VisualContextReuseError(RuntimeError):
+    pass
+
+
 class JobManager:
     def __init__(self) -> None:
         self.jobs: dict[str, TranslationJob] = {}
@@ -69,7 +73,7 @@ class JobManager:
         return data_dir / "jobs.json"
 
     def _delete_job_video(self, job: TranslationJob) -> None:
-        if not job.video_path:
+        if not job.video_path or not job.video_managed:
             return
         try:
             video_path = Path(job.video_path).resolve()
@@ -149,7 +153,7 @@ class JobManager:
     def get_job(self, job_id: str) -> TranslationJob | None:
         return self.jobs.get(job_id)
 
-    def build_reload_payload(self, job_id: str, *, video_download_url: str = "") -> ReloadJobResponse | None:
+    def build_reload_payload(self, job_id: str) -> ReloadJobResponse | None:
         job = self.jobs.get(job_id)
         if job is None:
             return None
@@ -203,8 +207,9 @@ class JobManager:
             video_file=ReloadJobVideo(
                 filename=job.video_filename or "",
                 available=video_available,
-                download_url=video_download_url if video_available else "",
             ),
+            visual_context_available=bool(job.visual_scene_contexts),
+            visual_context_count=len(job.visual_scene_contexts),
             warnings=warnings,
         )
 
@@ -732,13 +737,16 @@ class JobManager:
                         "language": track.language,
                         "filename": track.filename,
                         "text": match.text,
-                        "confidence": round(float(match.confidence or 0.0), 4),
+                        "alignment_confidence": round(float(match.confidence or 0.0), 4),
                         "alignment_mode": track.alignment_mode,
                     }
                 )
 
         for references in payload.values():
-            references.sort(key=lambda item: float(item.get("confidence") or 0.0), reverse=True)
+            references.sort(
+                key=lambda item: float(item.get("alignment_confidence") or 0.0),
+                reverse=True,
+            )
         return payload
 
     def _record_batch_context_snapshot(
@@ -940,6 +948,7 @@ class JobManager:
             job.settings,
             job.original_lines,
             base_context=job.session_context,
+            log_event=lambda level, message: self._append_log(job, level, message),
         )
         return generated
 
@@ -961,6 +970,12 @@ class JobManager:
             base_context=(target.input_context if target else None) or job.session_context,
             scope_label=f"batch {batch_index}",
             max_lines=len(batch_lines) or 120,
+            log_event=lambda level, message: self._append_log(
+                job,
+                level,
+                message,
+                batch_index=batch_index,
+            ),
         )
         return generated
 
@@ -1175,6 +1190,8 @@ class JobManager:
         reference_sources: list[dict[str, str]] | None = None,
         video_filename: str = "",
         video_path: str = "",
+        video_managed: bool = True,
+        reuse_visual_context_job_id: str = "",
     ) -> TranslationJob:
         duplicate = next(
             (
@@ -1207,8 +1224,41 @@ class JobManager:
             reference_uploads=reference_uploads,
             video_filename=video_filename,
             video_path=video_path,
+            video_managed=video_managed,
         )
+        if reuse_visual_context_job_id:
+            source_job = self.jobs.get(reuse_visual_context_job_id)
+            if source_job is None or source_job.original_srt != original_srt:
+                raise VisualContextReuseError(
+                    "Completed visual scene guides can only be reused with the same source subtitle."
+                )
+            if not source_job.visual_scene_contexts:
+                raise VisualContextReuseError("The selected job has no completed visual scene guides to reuse.")
+
+            job.visual_scene_contexts = deepcopy(source_job.visual_scene_contexts)
+            job.vision_stats.scene_cards_total = max(
+                len(job.visual_scene_contexts),
+                source_job.vision_stats.scene_cards_total,
+            )
+            job.vision_stats.scene_cards_created = len(job.visual_scene_contexts)
+            cloned_frame_count = self.vision.clone_scene_cache(source_job.id, job.id)
+            if cloned_frame_count:
+                job.visual_frames = deepcopy(
+                    [
+                        frame
+                        for frame in source_job.visual_frames
+                        if "scene_context" in frame.categories or frame.id.startswith("b-")
+                    ]
+                )
         self._append_log(job, "info", f"Job created for {filename}", save=False)
+        if reuse_visual_context_job_id:
+            self._append_log(
+                job,
+                "info",
+                f"Reused {len(job.visual_scene_contexts)} completed visual scene guide(s) from job "
+                f"{reuse_visual_context_job_id}; translation restarted from line 1",
+                save=False,
+            )
         if reference_tracks:
             self._append_log(job, "info", f"Loaded {len(reference_tracks)} reference subtitle track(s)", save=False)
             for track in reference_tracks:
@@ -1231,7 +1281,8 @@ class JobManager:
             self._append_log(
                 job,
                 "info",
-                f"Vision video loaded for {', '.join(modes)}: {video_filename}",
+                f"Vision video loaded for {', '.join(modes)}: {video_filename} "
+                f"({'workspace copy' if video_managed else 'original file, no copy'})",
                 save=False,
             )
         self.jobs[job.id] = job
@@ -1456,7 +1507,11 @@ class JobManager:
 
             if job.settings.structured_context and job.session_context is None:
                 self._append_log(job, "info", "Building initial context card", save=False)
-                initial_context = await self.translator.build_initial_context(job.settings, job.original_lines)
+                initial_context = await self.translator.build_initial_context(
+                    job.settings,
+                    job.original_lines,
+                    log_event=lambda level, message: self._append_log(job, level, message),
+                )
                 self._record_context(job, initial_context)
                 self._append_log(job, "info", "Initial context card ready", save=False)
                 self._save_state()
