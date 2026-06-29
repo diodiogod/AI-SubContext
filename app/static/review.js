@@ -20,8 +20,10 @@ const saveSnapshotBtn = document.getElementById("review-save-snapshot");
 const generateSnapshotBtn = document.getElementById("review-generate-snapshot");
 
 const jobId = window.location.pathname.split("/").filter(Boolean).pop();
+const REVIEW_SCROLL_STATE_KEY = `ai-subcontext-review-scroll-state:${jobId}`;
+const REVIEW_UI_STATE_KEY = `ai-subcontext-review-ui-state:${jobId}`;
 let currentJob = null;
-let currentFilter = "suspect";
+let currentFilter = "all";
 let currentSearch = "";
 let selectedPosition = null;
 let openBatchIndex = null;
@@ -33,6 +35,10 @@ let selectionAnchorPosition = null;
 const lineDrafts = new Map();
 const instructionDrafts = new Map();
 const contextDrafts = new Map();
+let reviewScrollRestorePending = true;
+let reviewScrollSaveFrame = null;
+let reviewUiRestorePending = true;
+let reviewUiSaveFrame = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -41,6 +47,137 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function readScrollState(storageKey) {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeScrollState(storageKey, state) {
+  sessionStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function readSessionState(storageKey) {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeSessionState(storageKey, state) {
+  sessionStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function parseStoredNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function parseStoredPositiveNumber(value) {
+  const numeric = parseStoredNumber(value);
+  return numeric !== null && numeric > 0 ? numeric : null;
+}
+
+function reviewScrollContainer() {
+  return document.querySelector(".review-table-wrap");
+}
+
+function saveReviewScrollState() {
+  const tableWrap = reviewScrollContainer();
+  writeScrollState(REVIEW_SCROLL_STATE_KEY, {
+    windowScrollTop: window.scrollY || 0,
+    tableScrollTop: tableWrap?.scrollTop || 0,
+  });
+}
+
+function scheduleReviewScrollSave() {
+  if (reviewScrollSaveFrame !== null) return;
+  reviewScrollSaveFrame = requestAnimationFrame(() => {
+    reviewScrollSaveFrame = null;
+    saveReviewScrollState();
+  });
+}
+
+function restoreReviewScrollState() {
+  if (!reviewScrollRestorePending) return;
+  reviewScrollRestorePending = false;
+  const state = readScrollState(REVIEW_SCROLL_STATE_KEY);
+  if (!state) return;
+  const tableWrap = reviewScrollContainer();
+  window.scrollTo({ top: Number(state.windowScrollTop || 0), behavior: "auto" });
+  if (tableWrap) {
+    tableWrap.scrollTop = Number(state.tableScrollTop || 0);
+  }
+}
+
+function captureReviewUiState() {
+  return {
+    windowScrollTop: window.scrollY || 0,
+    tableScrollTop: reviewScrollContainer()?.scrollTop || 0,
+    currentFilter,
+    currentSearch,
+    selectedPosition,
+    selectedPositions: [...selectedPositions],
+    selectionAnchorPosition,
+    openBatchIndex,
+    lineDrafts: [...lineDrafts.entries()],
+    instructionDrafts: [...instructionDrafts.entries()],
+    contextDrafts: [...contextDrafts.entries()],
+  };
+}
+
+function saveReviewUiState() {
+  writeSessionState(REVIEW_UI_STATE_KEY, captureReviewUiState());
+}
+
+function scheduleReviewUiSave() {
+  if (reviewUiSaveFrame !== null) return;
+  reviewUiSaveFrame = requestAnimationFrame(() => {
+    reviewUiSaveFrame = null;
+    saveReviewUiState();
+  });
+}
+
+function restoreReviewUiState() {
+  if (!reviewUiRestorePending) return;
+  reviewUiRestorePending = false;
+  const state = readSessionState(REVIEW_UI_STATE_KEY);
+  if (!state) return;
+  currentFilter = state.currentFilter || "all";
+  currentSearch = state.currentSearch || "";
+  if (searchEl) searchEl.value = currentSearch;
+  selectedPosition = parseStoredNumber(state.selectedPosition);
+  selectedPositions.clear();
+  for (const value of Array.isArray(state.selectedPositions) ? state.selectedPositions : []) {
+    const position = Number(value);
+    if (Number.isFinite(position)) selectedPositions.add(position);
+  }
+  selectionAnchorPosition = parseStoredNumber(state.selectionAnchorPosition);
+  openBatchIndex = parseStoredPositiveNumber(state.openBatchIndex);
+  lineDrafts.clear();
+  for (const [key, value] of Array.isArray(state.lineDrafts) ? state.lineDrafts : []) {
+    lineDrafts.set(key, value);
+  }
+  instructionDrafts.clear();
+  for (const [key, value] of Array.isArray(state.instructionDrafts) ? state.instructionDrafts : []) {
+    instructionDrafts.set(key, value);
+  }
+  contextDrafts.clear();
+  for (const [key, value] of Array.isArray(state.contextDrafts) ? state.contextDrafts : []) {
+    contextDrafts.set(key, value);
+  }
 }
 
 function emptySessionContext() {
@@ -87,7 +224,19 @@ function splitListText(value) {
 }
 
 function statusBadge(status) {
-  return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+  const label = {
+    normal: "Ready",
+    pending: "Pending",
+    translating: "Translating",
+    provisional: "Provisional",
+    retrying: "Retrying",
+    missing: "Missing",
+    suspect: "Check",
+    error: "Error",
+    auto_fixed: "Auto Fixed",
+    manual_fixed: "Edited",
+  }[status] || status;
+  return `<span class="badge ${escapeHtml(status)}">${escapeHtml(label)}</span>`;
 }
 
 function formatProgress(value) {
@@ -450,9 +599,18 @@ function deriveBatchInfo(job, batchIndex) {
   };
 }
 
-function lineStatus(issue) {
-  if (!issue) return "normal";
-  return issue.status || "normal";
+function lineStatus(job, issue, position, translatedMap) {
+  const activePositions = new Set((job.active_batch_positions || []).map(Number));
+  const recoveryPositions = new Set((job.active_recovery_positions || []).map(Number));
+  if (recoveryPositions.has(position) && (!issue || issue.status === "suspect")) return "retrying";
+  if (issue) return issue.status || "suspect";
+  if (activePositions.has(position)) {
+    return translatedMap.has(position) ? "provisional" : "translating";
+  }
+  if (translatedMap.has(position)) return "normal";
+  const batchIndex = lineBatchIndex(job, null, position);
+  if (batchIndex <= Number(job.current_batch || 0)) return "missing";
+  return "pending";
 }
 
 function lineBatchIndex(job, issue, position) {
@@ -472,7 +630,7 @@ function getLines(job) {
   return (job.original_lines || []).map(line => {
     const position = Number(line.position);
     const issue = issueMap.get(position) || null;
-    const status = lineStatus(issue);
+    const status = lineStatus(job, issue, position, translatedMap);
     const reasonTags = Array.isArray(issue?.reason_codes) && issue.reason_codes.length
       ? [...new Set(issue.reason_codes.map(code => String(code || "").trim()).filter(Boolean))]
       : inferReasonTags(issue);
@@ -503,6 +661,9 @@ function filteredLines(job) {
     if (currentFilter === "error" && line.status !== "error") return false;
     if (currentFilter === "fixed" && !["auto_fixed", "manual_fixed"].includes(line.status)) return false;
     if (currentFilter === "edited" && line.status !== "manual_fixed") return false;
+    if (currentFilter === "active" && !["translating", "provisional", "retrying"].includes(line.status)) return false;
+    if (currentFilter === "pending" && line.status !== "pending") return false;
+    if (currentFilter === "missing" && line.status !== "missing" && !line.reason_tags.includes("missing_output")) return false;
     if (currentFilter === "normal" && line.status !== "normal") return false;
     if (currentSearch) {
       const haystack = [
@@ -526,6 +687,9 @@ function countFilters(job) {
     error: lines.filter(line => line.status === "error").length,
     fixed: lines.filter(line => ["auto_fixed", "manual_fixed"].includes(line.status)).length,
     edited: lines.filter(line => line.status === "manual_fixed").length,
+    active: lines.filter(line => ["translating", "provisional", "retrying"].includes(line.status)).length,
+    pending: lines.filter(line => line.status === "pending").length,
+    missing: lines.filter(line => line.status === "missing" || line.reason_tags.includes("missing_output")).length,
     normal: lines.filter(line => line.status === "normal").length,
   };
 }
@@ -538,6 +702,9 @@ function renderFilters(job) {
     ["error", "Error"],
     ["fixed", "Fixed"],
     ["edited", "Edited"],
+    ["active", "Active"],
+    ["pending", "Pending"],
+    ["missing", "Missing"],
     ["normal", "Normal"],
   ];
   filtersEl.innerHTML = names.map(([key, label]) => `
@@ -587,7 +754,7 @@ function renderTable(job) {
         <td>${statusBadge(line.status)}</td>
         <td><div class="table-reasons">${renderReasonTags(line.reason_tags)}</div></td>
         <td><div class="table-copy">${escapeHtml(line.source_text)}</div></td>
-        <td><div class="table-copy">${escapeHtml(translated)}</div></td>
+        <td><div class="table-copy ${translated ? "" : "is-empty"}">${translated ? escapeHtml(translated) : `<span>${line.status === "pending" ? "Waiting for translation" : (line.status === "translating" ? "Model is translating this line" : "No translation returned")}</span>`}</div></td>
         <td><div class="table-reference-summary">${summarizeReferenceInline(line.reference_subtitles)}</div></td>
         <td>${escapeHtml(String(line.batch_index))}</td>
       </tr>
@@ -723,6 +890,7 @@ function renderAll() {
   updateToolbarState(currentJob);
   renderTable(currentJob);
   renderSide(currentJob);
+  scheduleReviewUiSave();
 }
 
 async function fetchJob() {
@@ -742,10 +910,29 @@ async function fetchJob() {
     activeEditor.closest("#review-snapshot-dialog")
   );
   if (!isEditing) {
+    restoreReviewUiState();
     renderAll();
+    if (openBatchIndex !== null) {
+      const batch = deriveBatchInfo(currentJob, openBatchIndex);
+      if (batch) {
+        renderSnapshotDialog(currentJob, openBatchIndex);
+        if (!snapshotDialog.open) {
+          snapshotDialog.showModal();
+        }
+      } else {
+        openBatchIndex = null;
+        saveReviewUiState();
+        if (snapshotDialog.open) {
+          snapshotDialog.close();
+        }
+      }
+    }
     if (snapshotDialog.open && openBatchIndex !== null) {
       renderSnapshotDialog(currentJob, openBatchIndex);
     }
+    requestAnimationFrame(() => {
+      restoreReviewScrollState();
+    });
   }
 }
 
@@ -1173,6 +1360,7 @@ document.addEventListener("click", (event) => {
     openBatchIndex = line.batch_index;
     renderSnapshotDialog(currentJob, openBatchIndex);
     snapshotDialog.showModal();
+    saveReviewUiState();
   }
 });
 
@@ -1212,7 +1400,14 @@ snapshotDialog.addEventListener("close", () => {
     contextDrafts.delete(snapshotDraftKey(openBatchIndex));
   }
   openBatchIndex = null;
+  saveReviewUiState();
 });
+document.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
+window.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
+window.addEventListener("pagehide", saveReviewScrollState, { passive: true });
+window.addEventListener("beforeunload", saveReviewScrollState, { passive: true });
+reviewScrollContainer()?.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
+document.addEventListener("change", scheduleReviewUiSave, true);
 
 void fetchJob();
 setInterval(fetchJob, 2500);

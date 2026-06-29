@@ -1,4 +1,5 @@
 const STORAGE_KEY = "ai-subcontext-settings";
+const UI_STATE_KEY = "ai-subcontext-prompt-lab-ui-state";
 const statusEl = document.getElementById("prompt-lab-status");
 const saveBtn = document.getElementById("prompt-lab-save");
 const resetBtn = document.getElementById("prompt-lab-reset");
@@ -17,6 +18,8 @@ const FIELD_IDS = [
 let runtimeDefaults = {};
 let legacyPromptFingerprints = {};
 let activePromptField = null;
+let promptLabRestorePending = true;
+let promptLabSaveFrame = null;
 
 function readStoredSettings() {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -31,6 +34,21 @@ function readStoredSettings() {
 
 function writeStoredSettings(nextSettings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSettings));
+}
+
+function readSessionState(storageKey) {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeSessionState(storageKey, state) {
+  sessionStorage.setItem(storageKey, JSON.stringify(state));
 }
 
 function setStatus(message, ok = true) {
@@ -60,9 +78,10 @@ function promptFingerprint(value) {
 
 function migrateLegacyPromptDefaults(stored) {
   let changed = false;
-  for (const [fieldId, fingerprint] of Object.entries(legacyPromptFingerprints)) {
+  for (const [fieldId, fingerprints] of Object.entries(legacyPromptFingerprints)) {
     const storedValue = stored[fieldId];
-    if (typeof storedValue !== "string" || promptFingerprint(storedValue) !== fingerprint) continue;
+    const knownFingerprints = Array.isArray(fingerprints) ? fingerprints : [fingerprints];
+    if (typeof storedValue !== "string" || !knownFingerprints.includes(promptFingerprint(storedValue))) continue;
     stored[fieldId] = runtimeDefaults[fieldId] ?? storedValue;
     changed = true;
   }
@@ -86,6 +105,60 @@ function populateFields() {
   }
 }
 
+function capturePromptLabState() {
+  const values = {};
+  for (const fieldId of FIELD_IDS) {
+    const field = document.getElementById(fieldId);
+    if (!field) continue;
+    values[fieldId] = fieldValue(field);
+  }
+  const activeField = activePromptField?.id || document.activeElement?.id || "";
+  return {
+    values,
+    scrollTop: window.scrollY || 0,
+    activeField,
+    selectionStart: activePromptField?.selectionStart ?? null,
+    selectionEnd: activePromptField?.selectionEnd ?? null,
+  };
+}
+
+function savePromptLabUiState() {
+  writeSessionState(UI_STATE_KEY, capturePromptLabState());
+}
+
+function schedulePromptLabUiSave() {
+  if (promptLabSaveFrame !== null) return;
+  promptLabSaveFrame = requestAnimationFrame(() => {
+    promptLabSaveFrame = null;
+    savePromptLabUiState();
+  });
+}
+
+function restorePromptLabUiState() {
+  if (!promptLabRestorePending) return;
+  promptLabRestorePending = false;
+  const state = readSessionState(UI_STATE_KEY);
+  if (!state) return;
+  if (state.values && typeof state.values === "object") {
+    for (const [fieldId, value] of Object.entries(state.values)) {
+      const field = document.getElementById(fieldId);
+      if (!field) continue;
+      field.value = value ?? "";
+    }
+  }
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: Number(state.scrollTop || 0), behavior: "auto" });
+    const field = state.activeField ? document.getElementById(state.activeField) : null;
+    if (field instanceof HTMLElement) {
+      field.focus({ preventScroll: true });
+      if (field instanceof HTMLTextAreaElement && Number.isFinite(Number(state.selectionStart)) && Number.isFinite(Number(state.selectionEnd))) {
+        field.setSelectionRange(Number(state.selectionStart), Number(state.selectionEnd));
+      }
+      activePromptField = field instanceof HTMLTextAreaElement ? field : null;
+    }
+  });
+}
+
 function collectPromptLabSettings() {
   const payload = {};
   for (const fieldId of FIELD_IDS) {
@@ -104,6 +177,7 @@ function savePromptLab() {
   };
   writeStoredSettings(next);
   setStatus("Prompt Lab saved. New and resumed jobs will use these settings.");
+  sessionStorage.removeItem(UI_STATE_KEY);
 }
 
 function resetPromptLab() {
@@ -115,15 +189,18 @@ function resetPromptLab() {
   writeStoredSettings(next);
   populateFields();
   setStatus("Prompt Lab reset to defaults. New jobs will use the default settings.");
+  sessionStorage.removeItem(UI_STATE_KEY);
 }
 
 function markDirty() {
   setStatus("Unsaved changes in Prompt Lab.");
+  schedulePromptLabUiSave();
 }
 
 function rememberPromptField(event) {
   if (event.currentTarget instanceof HTMLTextAreaElement) {
     activePromptField = event.currentTarget;
+    schedulePromptLabUiSave();
   }
 }
 
@@ -145,6 +222,7 @@ async function initializePromptLab() {
   try {
     await fetchRuntimeDefaults();
     populateFields();
+    restorePromptLabUiState();
     setStatus("Prompt Lab ready. Changes affect new jobs and paused/failed jobs when resumed.");
   } catch (error) {
     setStatus(error?.message || "Could not load Prompt Lab.", false);
@@ -154,6 +232,7 @@ async function initializePromptLab() {
 for (const fieldId of FIELD_IDS) {
   const field = document.getElementById(fieldId);
   field?.addEventListener("input", markDirty);
+  field?.addEventListener("change", schedulePromptLabUiSave);
   if (field instanceof HTMLTextAreaElement) {
     field.addEventListener("focus", rememberPromptField);
     field.addEventListener("click", rememberPromptField);
@@ -166,6 +245,10 @@ for (const chip of document.querySelectorAll("[data-prompt-variable]")) {
 
 saveBtn?.addEventListener("click", savePromptLab);
 resetBtn?.addEventListener("click", resetPromptLab);
+
+window.addEventListener("scroll", schedulePromptLabUiSave, { passive: true });
+window.addEventListener("pagehide", savePromptLabUiState, { passive: true });
+window.addEventListener("beforeunload", savePromptLabUiState, { passive: true });
 
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {

@@ -2,6 +2,8 @@ const STORAGE_KEY = "ai-subcontext-settings";
 const MODEL_HISTORY_KEY = "ai-subcontext-model-history";
 const MODEL_CALL_STATS_KEY = "ai-subcontext-model-call-stats";
 const LANGUAGE_TIPS_HISTORY_KEY = "ai-subcontext-language-tips-history";
+const CONSOLE_SCROLL_STATE_KEY = "ai-subcontext-console-scroll-state";
+const CONSOLE_UI_STATE_KEY = "ai-subcontext-console-ui-state";
 const MAX_MODEL_HISTORY = 10;
 const MAX_LANGUAGE_TIPS_HISTORY = 20;
 const LANGUAGE_TIPS_TARGET_SETUP = "setup";
@@ -110,6 +112,11 @@ const VIDEO_FILE_EXTENSIONS = new Set(["mp4", "mkv", "webm", "mov", "avi", "m4v"
 const jobsById = new Map();
 let openVisionEvidenceJobId = null;
 let openVisionEvidenceFrameId = null;
+let consoleScrollRestorePending = true;
+let consoleScrollSaveFrame = null;
+let consoleUiRestorePending = true;
+let consoleUiSaveFrame = null;
+let consoleScrollRestoreAttempts = 0;
 
 function readModelCallStats() {
   const raw = localStorage.getItem(MODEL_CALL_STATS_KEY);
@@ -126,6 +133,171 @@ let modelCallStats = readModelCallStats();
 
 function writeModelCallStats() {
   localStorage.setItem(MODEL_CALL_STATS_KEY, JSON.stringify(modelCallStats));
+}
+
+function readScrollState(storageKey) {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeScrollState(storageKey, state) {
+  sessionStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function readSessionState(storageKey) {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeSessionState(storageKey, state) {
+  sessionStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function parseStoredNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function parseStoredPositiveNumber(value) {
+  const numeric = parseStoredNumber(value);
+  return numeric !== null && numeric > 0 ? numeric : null;
+}
+
+function saveConsoleScrollState() {
+  writeScrollState(CONSOLE_SCROLL_STATE_KEY, {
+    scrollTop: window.scrollY || 0,
+  });
+}
+
+function scheduleConsoleScrollSave() {
+  if (consoleScrollSaveFrame !== null) return;
+  consoleScrollSaveFrame = requestAnimationFrame(() => {
+    consoleScrollSaveFrame = null;
+    saveConsoleScrollState();
+  });
+}
+
+function restoreConsoleScrollState() {
+  const state = readScrollState(CONSOLE_SCROLL_STATE_KEY);
+  if (!state) return;
+  const targetTop = Math.max(0, Number(state.scrollTop || 0));
+  const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  const appliedTop = Math.min(targetTop, maxScroll);
+  window.scrollTo({ top: appliedTop, behavior: "auto" });
+  const closeEnough = Math.abs(window.scrollY - appliedTop) <= 2;
+  const canFullyRestore = targetTop <= maxScroll;
+  if (closeEnough && canFullyRestore) {
+    consoleScrollRestorePending = false;
+    consoleScrollRestoreAttempts = 0;
+    return;
+  }
+  if (!consoleScrollRestorePending) {
+    consoleScrollRestorePending = true;
+  }
+  if (consoleScrollRestoreAttempts >= 24) {
+    consoleScrollRestorePending = false;
+    consoleScrollRestoreAttempts = 0;
+    return;
+  }
+  consoleScrollRestoreAttempts += 1;
+  requestAnimationFrame(() => restoreConsoleScrollState());
+}
+
+function serializeFormDraft() {
+  const draft = {};
+  for (const element of form.elements) {
+    if (!element.id || element.type === "file" || element.tagName === "BUTTON" || element.dataset.transient === "true") continue;
+    draft[element.id] = element.type === "checkbox" ? element.checked : element.value;
+  }
+  return draft;
+}
+
+function serializeReferenceTrackDraft() {
+  if (!referenceTracksEl) return [];
+  return [...referenceTracksEl.querySelectorAll(".reference-track-row")].map(row => ({
+    language: row.querySelector("[data-reference-language]")?.value || "",
+    fileName: row.querySelector("[data-reference-file]")?.files?.[0]?.name || "",
+  }));
+}
+
+function captureConsoleUiState() {
+  return {
+    tabId: [...consoleTabButtons].find(button => button.classList.contains("active"))?.dataset.consoleTab || "runtime",
+    scrollTop: window.scrollY || 0,
+    formDraft: serializeFormDraft(),
+    referenceTracks: serializeReferenceTrackDraft(),
+    editingJobId,
+    openLogJobId,
+    openReviewJobId,
+    openReviewFilter,
+    openSnapshotJobId,
+    openSnapshotBatchIndex,
+  };
+}
+
+function saveConsoleUiState() {
+  writeSessionState(CONSOLE_UI_STATE_KEY, captureConsoleUiState());
+}
+
+function scheduleConsoleUiSave() {
+  if (consoleUiSaveFrame !== null) return;
+  consoleUiSaveFrame = requestAnimationFrame(() => {
+    consoleUiSaveFrame = null;
+    saveConsoleUiState();
+  });
+}
+
+function restoreConsoleUiState() {
+  if (!consoleUiRestorePending) return;
+  consoleUiRestorePending = false;
+  const state = readSessionState(CONSOLE_UI_STATE_KEY);
+  if (!state) return;
+
+  if (state.formDraft && typeof state.formDraft === "object") {
+    for (const [key, value] of Object.entries(state.formDraft)) {
+      const field = document.getElementById(key);
+      if (!field || field.type === "file") continue;
+      if (field.type === "checkbox") {
+        field.checked = Boolean(value);
+      } else {
+        field.value = value ?? "";
+      }
+    }
+  }
+
+  if (Array.isArray(state.referenceTracks) && referenceTracksEl) {
+    resetReferenceTrackRows();
+    for (const rowState of state.referenceTracks) {
+      const row = addReferenceTrackRow(rowState?.language || "");
+      const label = row?.querySelector("[data-reference-file-name]");
+      if (label && rowState?.fileName) {
+        label.textContent = `${rowState.fileName} (restore file manually)`;
+      }
+    }
+  }
+
+  if (typeof state.tabId === "string") {
+    setConsoleTab(state.tabId);
+  }
+  openLogJobId = state.openLogJobId || null;
+  openReviewJobId = state.openReviewJobId || null;
+  openReviewFilter = state.openReviewFilter || "all";
+  openSnapshotJobId = state.openSnapshotJobId || null;
+  openSnapshotBatchIndex = parseStoredPositiveNumber(state.openSnapshotBatchIndex);
+  editingJobId = state.editingJobId || null;
 }
 
 function modelCallSignature(job) {
@@ -880,6 +1052,7 @@ function setConsoleTab(tabId) {
     panel.classList.toggle("active", active);
     panel.hidden = !active;
   }
+  scheduleConsoleUiSave();
 }
 
 function loadSettings() {
@@ -897,6 +1070,7 @@ function loadSettings() {
     rememberModel(settings.model);
   }
   updateVisionControls();
+  scheduleConsoleUiSave();
 }
 
 function saveSettings() {
@@ -909,6 +1083,7 @@ function saveSettings() {
   if (payload.model) {
     rememberModel(payload.model);
   }
+  scheduleConsoleUiSave();
 }
 
 async function responseErrorDetail(response, fallbackMessage) {
@@ -1196,6 +1371,7 @@ function addReferenceTrackRow(language = "") {
     bindDropZone(picker, input);
   }
   renderReferenceTrackEmptyState();
+  scheduleConsoleUiSave();
   return row;
 }
 
@@ -1204,6 +1380,7 @@ function removeReferenceTrackRow(button) {
   if (!row) return;
   row.remove();
   renderReferenceTrackEmptyState();
+  scheduleConsoleUiSave();
 }
 
 function collectReferenceTracks() {
@@ -1227,6 +1404,7 @@ function resetReferenceTrackRows() {
   if (!referenceTracksEl) return;
   referenceTracksEl.innerHTML = "";
   renderReferenceTrackEmptyState();
+  scheduleConsoleUiSave();
 }
 
 function emptyReferenceTrackRows() {
@@ -2804,10 +2982,25 @@ async function fetchJobs() {
   if (modelInput?.value) models.unshift(modelInput.value);
   writeModelHistory(models);
   renderJobs(jobs);
+  if (editingJobId) {
+    const openJob = jobs.find(job => job.id === editingJobId);
+    if (openJob) {
+      renderMainContextDialog(openJob, openJob.session_context || {});
+      if (!dialog?.open) {
+        dialog?.showModal();
+      }
+    } else if (dialog?.open) {
+      dialog.close();
+      editingJobId = null;
+    }
+  }
   if (openLogJobId) {
     const openJob = jobs.find(job => job.id === openLogJobId);
     if (openJob) {
       renderLogDialog(openJob, { preserveScroll: true });
+      if (!logDialog?.open) {
+        logDialog?.showModal();
+      }
     } else if (logDialog?.open) {
       logDialog.close();
       openLogJobId = null;
@@ -2822,6 +3015,9 @@ async function fetchJobs() {
       if (!activeReviewInput) {
         renderReviewDialog(openJob, openReviewFilter);
       }
+      if (!reviewDialog?.open) {
+        reviewDialog?.showModal();
+      }
     } else if (reviewDialog?.open) {
       reviewDialog.close();
       openReviewJobId = null;
@@ -2831,17 +3027,35 @@ async function fetchJobs() {
   if (openSnapshotJobId && openSnapshotBatchIndex !== null) {
     const openJob = jobs.find(job => job.id === openSnapshotJobId);
     if (openJob) {
+      const snapshotInfo = deriveBatchInfo(openJob, openSnapshotBatchIndex);
+      if (!snapshotInfo) {
+        openSnapshotJobId = null;
+        openSnapshotBatchIndex = null;
+        if (snapshotDialog?.open) {
+          snapshotDialog.close();
+        }
+        saveConsoleUiState();
+      } else {
       const activeSnapshotEditor = snapshotDialog?.open
         ? snapshotDialog.querySelector("input:focus, textarea:focus, select:focus")
         : null;
-      if (!activeSnapshotEditor) {
-        renderSnapshotDialog(openJob, openSnapshotBatchIndex);
+        if (!activeSnapshotEditor) {
+          renderSnapshotDialog(openJob, openSnapshotBatchIndex);
+        }
+        if (!snapshotDialog?.open) {
+          snapshotDialog?.showModal();
+        }
       }
     } else if (snapshotDialog?.open) {
       snapshotDialog.close();
       openSnapshotJobId = null;
       openSnapshotBatchIndex = null;
     }
+  }
+  if (consoleUiRestorePending) {
+    requestAnimationFrame(() => {
+      restoreConsoleScrollState();
+    });
   }
 }
 
@@ -3058,6 +3272,7 @@ function applyReloadSettings(payload) {
   saveSettings();
   renderModelHistory();
   renderModelSelect();
+  scheduleConsoleUiSave();
 }
 
 function resetJobFormFiles() {
@@ -3479,6 +3694,7 @@ document.addEventListener("click", (event) => {
     if (hasTextSelection) {
       return;
     }
+    saveConsoleScrollState();
     window.location.href = workspaceCard.dataset.workspaceUrl;
     return;
   }
@@ -3548,6 +3764,7 @@ document.addEventListener("click", (event) => {
     if (!Number.isFinite(batchIndex)) return;
     openSnapshotJobId = openReviewJobId;
     openSnapshotBatchIndex = batchIndex;
+    scheduleConsoleUiSave();
     void fetch(`/api/jobs/${openReviewJobId}`)
       .then(response => response.json())
       .then(job => {
@@ -3560,6 +3777,7 @@ document.addEventListener("click", (event) => {
   if (reviewFilter) {
     if (!openReviewJobId) return;
     openReviewFilter = reviewFilter.dataset.reviewFilter || "all";
+    scheduleConsoleUiSave();
     void fetch(`/api/jobs/${openReviewJobId}`)
       .then(response => response.json())
       .then(job => renderReviewDialog(job, openReviewFilter));
@@ -3569,6 +3787,7 @@ document.addEventListener("click", (event) => {
   if (logTab && openLogJobId) {
     const tab = logTab.dataset.logTab || "events";
     logDialogTabs.set(openLogJobId, tab);
+    scheduleConsoleUiSave();
     void fetch(`/api/jobs/${openLogJobId}`)
       .then(response => response.json())
       .then(job => renderLogDialog(job));
@@ -3661,6 +3880,7 @@ for (const button of consoleTabButtons) {
 }
 logDialog?.addEventListener("close", () => {
   openLogJobId = null;
+  scheduleConsoleUiSave();
 });
 reviewDialog?.addEventListener("close", () => {
   if (openReviewJobId) {
@@ -3677,6 +3897,7 @@ reviewDialog?.addEventListener("close", () => {
   }
   openReviewJobId = null;
   openReviewFilter = "all";
+  scheduleConsoleUiSave();
 });
 snapshotDialog?.addEventListener("close", () => {
   if (openSnapshotJobId && openSnapshotBatchIndex !== null) {
@@ -3684,6 +3905,7 @@ snapshotDialog?.addEventListener("close", () => {
   }
   openSnapshotJobId = null;
   openSnapshotBatchIndex = null;
+  scheduleConsoleUiSave();
 });
 logDialogBody?.addEventListener("scroll", () => {
   if (!openLogJobId) return;
@@ -3712,6 +3934,12 @@ document.addEventListener("wheel", (event) => {
   scheduleVisionRailFocus(rail);
 }, { passive: false });
 window.addEventListener("resize", () => refreshVisionRails(), { passive: true });
+window.addEventListener("scroll", scheduleConsoleScrollSave, { passive: true });
+window.addEventListener("scroll", scheduleConsoleUiSave, { passive: true });
+window.addEventListener("pagehide", saveConsoleScrollState, { passive: true });
+window.addEventListener("pagehide", saveConsoleUiState, { passive: true });
+window.addEventListener("beforeunload", saveConsoleScrollState, { passive: true });
+window.addEventListener("beforeunload", saveConsoleUiState, { passive: true });
 dialog?.addEventListener("close", () => {
   closeLanguageTipsMenus();
   if (editingJobId) {
@@ -3719,6 +3947,7 @@ dialog?.addEventListener("close", () => {
     contextLanguageTipsDrafts.delete(editingJobId);
   }
   editingJobId = null;
+  scheduleConsoleUiSave();
 });
 fileInput.addEventListener("change", acceptSelectedSourceFile);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
@@ -3760,6 +3989,7 @@ modelSelect.addEventListener("change", () => {
   rememberModel(modelSelect.value);
   renderModelHistory();
   renderModelSelect();
+  scheduleConsoleUiSave();
 });
 loadModelsBtn.addEventListener("click", () => void fetchModelList());
 reviewExistingBtn.addEventListener("click", () => void createReviewJob());
@@ -3770,10 +4000,22 @@ bindReferenceTrackCard(referenceTracksCard);
 setConsoleTab("runtime");
 renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
 
+document.addEventListener("input", (event) => {
+  if (event.target instanceof Element && event.target.closest("#job-form, #context-dialog, #review-dialog, #snapshot-dialog, #log-dialog")) {
+    scheduleConsoleUiSave();
+  }
+}, true);
+document.addEventListener("change", (event) => {
+  if (event.target instanceof Element && event.target.closest("#job-form, #context-dialog, #review-dialog, #snapshot-dialog, #log-dialog")) {
+    scheduleConsoleUiSave();
+  }
+}, true);
+
 async function initializeApp() {
   await fetchRuntimeDefaults();
   loadSettings();
   applyRuntimeDefaults();
+  restoreConsoleUiState();
   renderModelHistory();
   renderModelSelect();
   renderLanguageTipsHistoryMenu(LANGUAGE_TIPS_TARGET_SETUP, document);
@@ -3787,6 +4029,7 @@ async function initializeApp() {
   });
   await fetchModelList();
   await fetchJobs();
+  requestAnimationFrame(() => restoreConsoleScrollState());
   setInterval(fetchJobs, 2500);
   setInterval(updateLiveTimeoutDisplays, 1000);
 }
