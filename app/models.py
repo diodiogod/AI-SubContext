@@ -237,6 +237,9 @@ class TranslationJob(BaseModel):
     error: str | None = None
     current_batch: int = 0
     total_batches: int = 0
+    active_batch_index: int | None = None
+    active_batch_positions: list[int] = Field(default_factory=list)
+    active_recovery_positions: list[int] = Field(default_factory=list)
     pause_requested: bool = False
     stop_requested: bool = False
     translated_srt: str | None = None
@@ -317,7 +320,7 @@ class RuntimeDefaultsResponse(BaseModel):
     prompt_full_context_refresh_system: str
     prompt_batch_context_refresh_system: str
     prompt_line_revision_system: str
-    legacy_prompt_fingerprints: dict[str, str] = Field(default_factory=dict)
+    legacy_prompt_fingerprints: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class UpdateContextRequest(BaseModel):

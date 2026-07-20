@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260628-2" />
+    <link rel="stylesheet" href="/static/app.css?v=20260720-3" />
   </head>
   <body>
     <main class="shell review-shell">
@@ -52,20 +52,21 @@
 
       <section class="review-layout">
         <section class="panel review-table-panel">
-          <div id="review-table-summary" class="job-meta"></div>
+          <div class="review-table-headbar">
+            <div id="review-table-summary" class="job-meta"></div>
+            <details class="review-column-menu">
+              <summary>Columns</summary>
+              <div class="review-column-menu-body">
+                <div id="review-column-controls" class="review-column-controls"></div>
+                <button type="button" id="review-column-reset" class="ghost">Reset layout</button>
+              </div>
+            </details>
+          </div>
           <div class="review-table-wrap">
             <table class="review-table">
+              <colgroup id="review-table-columns"></colgroup>
               <thead>
-                <tr>
-                  <th>Line</th>
-                  <th>Time</th>
-                  <th>Status</th>
-                  <th>Reason</th>
-                  <th>Source</th>
-                  <th>Translation</th>
-                  <th>Refs</th>
-                  <th>Batch</th>
-                </tr>
+                <tr id="review-table-header"></tr>
               </thead>
               <tbody id="review-table-body">
                 <tr><td colspan="8" class="job-meta">Loading lines...</td></tr>
@@ -99,6 +100,6 @@
       </form>
     </dialog>
 
-    <script src="/static/review.js?v=20260629-1"></script>
+    <script src="/static/review.js?v=20260720-2"></script>
   </body>
   </html>

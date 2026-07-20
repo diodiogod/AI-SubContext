@@ -329,9 +329,6 @@ function updateVisionRailFocus(rail) {
   if (!frames.length) return;
   const railRect = rail.getBoundingClientRect();
   const focusCenter = railRect.left + (railRect.width / 2);
-  const expanded = Boolean(rail.closest(".vision-timeline.expanded"));
-  const minWidth = expanded ? 118 : 68;
-  const maxWidth = expanded ? 190 : 116;
   const focusRange = Math.max(railRect.width * 0.58, 180);
 
   for (const frame of frames) {
@@ -339,10 +336,7 @@ function updateVisionRailFocus(rail) {
     const frameCenter = frameRect.left + (frameRect.width / 2);
     const distance = Math.abs(frameCenter - focusCenter);
     const focus = Math.max(0, 1 - (distance / focusRange));
-    const easedFocus = focus * focus * (3 - (2 * focus));
-    const width = minWidth + ((maxWidth - minWidth) * easedFocus);
     const opacity = 0.52 + (0.48 * focus);
-    frame.style.setProperty("--frame-focus-width", `${width.toFixed(1)}px`);
     frame.style.setProperty("--frame-opacity", opacity.toFixed(2));
   }
 }
@@ -360,9 +354,10 @@ function rememberVisionRailScroll(rail) {
   const railKey = rail?.dataset?.visionRailKey;
   if (!railKey) return;
   const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+  const isLive = rail.dataset.visionLive === "true";
   visionRailScrollState.set(railKey, {
     scrollLeft: rail.scrollLeft,
-    followLatest: maxScroll - rail.scrollLeft <= 24,
+    followLatest: isLive && maxScroll - rail.scrollLeft <= 24,
   });
 }
 
@@ -377,14 +372,17 @@ function refreshVisionRails(root = document) {
     const railKey = rail.dataset.visionRailKey;
     if (railKey) {
       const saved = visionRailScrollState.get(railKey);
+      const isLive = rail.dataset.visionLive === "true";
       if (saved) {
         const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
-        rail.scrollLeft = saved.followLatest ? maxScroll : Math.min(saved.scrollLeft, maxScroll);
+        rail.scrollLeft = isLive && saved.followLatest
+          ? maxScroll
+          : Math.min(saved.scrollLeft, maxScroll);
       } else {
         rail.scrollLeft = Math.max(0, rail.scrollWidth - rail.clientWidth);
         visionRailScrollState.set(railKey, {
           scrollLeft: rail.scrollLeft,
-          followLatest: true,
+          followLatest: isLive,
         });
       }
     }
@@ -401,6 +399,7 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
   });
   const visible = compact ? ordered.slice(-24) : ordered.slice(-80);
   const newestId = visible[visible.length - 1]?.id;
+  const isLive = job?.status === "processing" || job?.status === "queued";
   const stats = job?.vision_stats || {};
   return `
     <section class="vision-timeline ${compact ? "compact" : "expanded"}">
@@ -420,7 +419,7 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
           <button type="button" class="vision-rail-control" data-vision-scroll="1" title="Scroll visual evidence forward" aria-label="Next screenshots">›</button>
         </div>
       </div>
-      <div class="vision-rail" data-vision-rail-key="${escapeHtml(`${job.id}:${location}`)}">
+      <div class="vision-rail" data-vision-rail-key="${escapeHtml(`${job.id}:${location}`)}" data-vision-live="${isLive ? "true" : "false"}">
         ${visible.map((frame, index) => {
           const frameId = String(frame.id || "");
           const isNew = frameId && !seenVisionFrameIds.has(`${job.id}:${frameId}`);
@@ -2353,7 +2352,7 @@ function renderJobs(jobs) {
     activeJobCard.classList.remove("hidden");
     activeJobCard.innerHTML = renderContext(active);
     animateCurrentModelCallBar(active);
-    requestAnimationFrame(() => refreshVisionRails(activeJobCard));
+    refreshVisionRails(activeJobCard);
   } else {
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
@@ -2489,7 +2488,7 @@ function renderJobs(jobs) {
   `;
     }).join("")}</div>
   `;
-  requestAnimationFrame(() => refreshVisionRails(jobsEl));
+  refreshVisionRails(jobsEl);
 }
 
 function renderLogDialog(job, options = {}) {
@@ -2679,7 +2678,7 @@ function renderLogDialog(job, options = {}) {
     scrollTop: logDialogBody.scrollTop,
     scrollHeight: logDialogBody.scrollHeight,
   });
-  requestAnimationFrame(() => refreshVisionRails(logDialogBody));
+  refreshVisionRails(logDialogBody);
 }
 
 function filterIssues(issues, filter) {

@@ -12,6 +12,11 @@ const nextFlaggedBtn = document.getElementById("review-next-flagged");
 const autoRewriteNextBtn = document.getElementById("review-auto-rewrite-next");
 const summaryEl = document.getElementById("review-table-summary");
 const tableBody = document.getElementById("review-table-body");
+const tableEl = document.querySelector(".review-table");
+const tableHeader = document.getElementById("review-table-header");
+const tableColumns = document.getElementById("review-table-columns");
+const columnControls = document.getElementById("review-column-controls");
+const columnResetBtn = document.getElementById("review-column-reset");
 const sideBody = document.getElementById("review-side-body");
 const snapshotDialog = document.getElementById("review-snapshot-dialog");
 const snapshotTitle = document.getElementById("review-snapshot-title");
@@ -22,6 +27,19 @@ const generateSnapshotBtn = document.getElementById("review-generate-snapshot");
 const jobId = window.location.pathname.split("/").filter(Boolean).pop();
 const REVIEW_SCROLL_STATE_KEY = `ai-subcontext-review-scroll-state:${jobId}`;
 const REVIEW_UI_STATE_KEY = `ai-subcontext-review-ui-state:${jobId}`;
+const REVIEW_COLUMN_STATE_KEY = "ai-subcontext-review-columns:v2";
+const REVIEW_COLUMN_DEFINITIONS = {
+  line: { label: "Line", width: 56, visible: true },
+  status: { label: "Status", width: 88, visible: true },
+  reason: { label: "Reason", width: 122, visible: true },
+  subtitle: { label: "Subtitle", width: 560, visible: true },
+  source: { label: "Source", width: 300, visible: false },
+  translation: { label: "Translation", width: 340, visible: false },
+  time: { label: "Time", width: 170, visible: false },
+  refs: { label: "Refs", width: 150, visible: false },
+  batch: { label: "Batch", width: 72, visible: false },
+};
+const DEFAULT_REVIEW_COLUMN_ORDER = ["line", "status", "reason", "subtitle", "source", "translation", "time", "refs", "batch"];
 let currentJob = null;
 let currentFilter = "all";
 let currentSearch = "";
@@ -39,6 +57,8 @@ let reviewScrollRestorePending = true;
 let reviewScrollSaveFrame = null;
 let reviewUiRestorePending = true;
 let reviewUiSaveFrame = null;
+let reviewColumnState = loadReviewColumnState();
+let resizingColumn = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -47,6 +67,163 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function parseSubtitleFormatting(value) {
+  const raw = String(value ?? "");
+  const tagPattern = /<[^>]*>/g;
+  const stack = [];
+  const html = [];
+  let cursor = 0;
+  let formatted = false;
+
+  const fail = () => ({ valid: false, formatted: true, html: escapeHtml(raw) });
+  for (const match of raw.matchAll(tagPattern)) {
+    html.push(escapeHtml(raw.slice(cursor, match.index)));
+    cursor = Number(match.index) + match[0].length;
+    const tag = match[0];
+    const closeMatch = tag.match(/^<\/\s*(font|b|i|u)\s*>$/i);
+    if (closeMatch) {
+      const name = closeMatch[1].toLowerCase();
+      if (stack.pop() !== name) return fail();
+      html.push(name === "font" ? "</span>" : `</${name}>`);
+      formatted = true;
+      continue;
+    }
+
+    const simpleOpen = tag.match(/^<\s*(b|i|u)\s*>$/i);
+    if (simpleOpen) {
+      const name = simpleOpen[1].toLowerCase();
+      stack.push(name);
+      html.push(`<${name}>`);
+      formatted = true;
+      continue;
+    }
+
+    const fontOpen = tag.match(/^<\s*font\b([^>]*)>$/i);
+    if (!fontOpen) return fail();
+    const attributes = fontOpen[1];
+    const attributePattern = /\s+([a-z][\w-]*)\s*=\s*("[^"]*"|'[^']*')/gi;
+    const styles = [];
+    let consumed = "";
+    for (const attribute of attributes.matchAll(attributePattern)) {
+      consumed += attribute[0];
+      const name = attribute[1].toLowerCase();
+      const attrValue = attribute[2].slice(1, -1).trim();
+      if (name === "color" && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(attrValue)) {
+        styles.push(`color:${attrValue}`);
+      } else if (name === "face" && /^[a-z0-9 ,_-]{1,80}$/i.test(attrValue)) {
+        styles.push(`font-family:${attrValue}`);
+      } else if (name === "size" && /^[1-7]$/.test(attrValue)) {
+        const scale = ["", "0.72em", "0.84em", "1em", "1.18em", "1.36em", "1.58em", "1.82em"];
+        styles.push(`font-size:${scale[Number(attrValue)]}`);
+      } else {
+        return fail();
+      }
+    }
+    if (consumed.trim() !== attributes.trim()) return fail();
+    stack.push("font");
+    html.push(`<span class="subtitle-font-span"${styles.length ? ` style="${styles.join(";")}"` : ""}>`);
+    formatted = true;
+  }
+
+  html.push(escapeHtml(raw.slice(cursor)));
+  const textOutsideCompleteTags = raw.replace(/<[^>]*>/g, "");
+  if (
+    stack.length
+    || /<\/?\s*(?:font|b|i|u)\b/i.test(textOutsideCompleteTags)
+    || /\[+\s*(?:SUBF[A-Z]*|SUBBR)_\d+/i.test(raw)
+  ) return fail();
+  return { valid: true, formatted, html: html.join("") };
+}
+
+function renderSubtitlePreview(value, { compact = false } = {}) {
+  const raw = String(value ?? "");
+  const parsed = parseSubtitleFormatting(raw);
+  if (!parsed.valid) {
+    return `
+      <div class="subtitle-preview is-broken ${compact ? "compact" : ""}">
+        <span class="subtitle-format-warning">broken formatting</span>
+        <code>${escapeHtml(raw)}</code>
+      </div>
+    `;
+  }
+  return `
+    <div class="subtitle-preview ${parsed.formatted ? "is-formatted" : "is-plain"} ${compact ? "compact" : ""}">
+      ${parsed.html}
+    </div>
+  `;
+}
+
+function defaultReviewColumnState() {
+  return DEFAULT_REVIEW_COLUMN_ORDER.map(key => ({
+    key,
+    width: REVIEW_COLUMN_DEFINITIONS[key].width,
+    visible: REVIEW_COLUMN_DEFINITIONS[key].visible,
+  }));
+}
+
+function loadReviewColumnState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(REVIEW_COLUMN_STATE_KEY) || "null");
+    if (!Array.isArray(saved)) return defaultReviewColumnState();
+    const byKey = new Map(saved.map(item => [String(item?.key || ""), item]));
+    const orderedKeys = [
+      ...saved.map(item => String(item?.key || "")).filter(key => REVIEW_COLUMN_DEFINITIONS[key]),
+      ...DEFAULT_REVIEW_COLUMN_ORDER.filter(key => !byKey.has(key)),
+    ];
+    return [...new Set(orderedKeys)].map(key => {
+      const item = byKey.get(key) || {};
+      const definition = REVIEW_COLUMN_DEFINITIONS[key];
+      return {
+        key,
+        width: Math.max(48, Math.min(720, Number(item.width) || definition.width)),
+        visible: item.visible === undefined ? definition.visible : Boolean(item.visible),
+      };
+    });
+  } catch (_) {
+    return defaultReviewColumnState();
+  }
+}
+
+function saveReviewColumnState() {
+  localStorage.setItem(REVIEW_COLUMN_STATE_KEY, JSON.stringify(reviewColumnState));
+}
+
+function visibleReviewColumns() {
+  return reviewColumnState.filter(column => column.visible);
+}
+
+function renderColumnControls() {
+  if (!columnControls) return;
+  columnControls.innerHTML = reviewColumnState.map(column => `
+    <label>
+      <input type="checkbox" data-column-visible="${escapeHtml(column.key)}" ${column.visible ? "checked" : ""} />
+      <span>${escapeHtml(REVIEW_COLUMN_DEFINITIONS[column.key].label)}</span>
+    </label>
+  `).join("");
+}
+
+function renderTableStructure() {
+  const columns = visibleReviewColumns();
+  if (tableColumns) {
+    tableColumns.innerHTML = columns.map(column => (
+      `<col data-column="${escapeHtml(column.key)}" style="width:${column.width}px" />`
+    )).join("");
+  }
+  if (tableHeader) {
+    tableHeader.innerHTML = columns.map(column => `
+      <th draggable="true" data-column-header="${escapeHtml(column.key)}" title="Drag to reorder">
+        <span>${escapeHtml(REVIEW_COLUMN_DEFINITIONS[column.key].label)}</span>
+        <span class="review-column-resizer" data-column-resize="${escapeHtml(column.key)}" title="Drag to resize"></span>
+      </th>
+    `).join("");
+  }
+  if (tableEl) {
+    const totalWidth = columns.reduce((total, column) => total + column.width, 0);
+    tableEl.style.minWidth = `${Math.max(520, totalWidth)}px`;
+  }
+  renderColumnControls();
 }
 
 function readScrollState(storageKey) {
@@ -263,6 +440,9 @@ function compactReasonLabel(reason) {
     retry_fixed: "Retry Fixed",
     isolated_retry: "Retry Fixed",
     validator_language_mismatch: "Lang Mismatch",
+    formatting_mismatch: "Formatting",
+    boundary_drift: "Boundary",
+    boundary_sequence_drift: "Cue Shift",
     other: "Other",
   }[reason] || "Other";
 }
@@ -360,6 +540,9 @@ function inferReasonTags(issue) {
   if (joined.includes("unchanged from source") || joined.includes("same as source") || joined.includes("unchanged")) tags.push("unchanged");
   if (joined.includes("manually updated") || joined.includes("review panel") || joined.includes("confirmed as correct")) tags.push("manual");
   if (joined.includes("validation cleared after retry") || joined.includes("isolated retry fixed") || joined.includes("stricter instruction")) tags.push("retry_fixed");
+  if (joined.includes("formatting was missing") || joined.includes("formatting mismatch")) tags.push("formatting_mismatch");
+  if (joined.includes("shifted into a neighboring") || joined.includes("neighboring-cue")) tags.push("boundary_sequence_drift");
+  else if (joined.includes("subtitle boundary")) tags.push("boundary_drift");
   if (!tags.length && notes.length) tags.push("other");
   return [...new Set(tags)];
 }
@@ -710,7 +893,7 @@ function renderFilters(job) {
   filtersEl.innerHTML = names.map(([key, label]) => `
     <button
       type="button"
-      class="review-filter ${currentFilter === key ? "is-active" : ""}"
+      class="review-filter filter-${escapeHtml(key)} ${currentFilter === key ? "is-active" : ""}"
       data-filter="${escapeHtml(key)}"
     >
       ${escapeHtml(label)} (${escapeHtml(String(counts[key] || 0))})
@@ -732,12 +915,45 @@ function updateToolbarState(job) {
   autoRewriteNextBtn.textContent = autoRewritePending ? "Stop Auto Rewrite" : "Auto Rewrite All";
 }
 
+function renderReviewTableCell(columnKey, line, translated, timeLabel) {
+  const emptyTranslation = `<span>${line.status === "pending" ? "Waiting for translation" : (line.status === "translating" ? "Model is translating this line" : "No translation returned")}</span>`;
+  const content = {
+    line: escapeHtml(String(line.position + 1)),
+    time: `<div class="table-time">${escapeHtml(timeLabel)}</div>`,
+    status: statusBadge(line.status),
+    reason: `<div class="table-reasons">${renderReasonTags(line.reason_tags)}</div>`,
+    subtitle: `
+      <div class="stacked-subtitle-pair">
+        <div class="stacked-subtitle-part source">
+          <span class="stacked-subtitle-label">Source</span>
+          ${renderSubtitlePreview(line.source_text, { compact: true })}
+        </div>
+        <div class="stacked-subtitle-part translation ${translated ? "" : "is-empty"}">
+          <span class="stacked-subtitle-label">Translation</span>
+          ${translated ? renderSubtitlePreview(translated, { compact: true }) : emptyTranslation}
+        </div>
+      </div>
+    `,
+    source: `<div class="table-copy">${renderSubtitlePreview(line.source_text, { compact: true })}</div>`,
+    translation: `<div class="table-copy ${translated ? "" : "is-empty"}">${
+      translated
+        ? renderSubtitlePreview(translated, { compact: true })
+        : emptyTranslation
+    }</div>`,
+    refs: `<div class="table-reference-summary">${summarizeReferenceInline(line.reference_subtitles)}</div>`,
+    batch: escapeHtml(String(line.batch_index)),
+  }[columnKey] ?? "";
+  return `<td data-column-cell="${escapeHtml(columnKey)}">${content}</td>`;
+}
+
 function renderTable(job) {
+  renderTableStructure();
+  const columns = visibleReviewColumns();
   const rows = filteredLines(job);
   const linesWithReferences = rows.filter(line => line.reference_subtitles.length).length;
   summaryEl.textContent = `${rows.length} line(s) visible${linesWithReferences ? ` • ${linesWithReferences} with references` : ""}`;
   if (!rows.length) {
-    tableBody.innerHTML = `<tr><td colspan="8" class="job-meta">No lines in this filter.</td></tr>`;
+    tableBody.innerHTML = `<tr><td colspan="${Math.max(1, columns.length)}" class="job-meta">No lines in this filter.</td></tr>`;
     return;
   }
   if (!rows.some(line => line.position === selectedPosition)) {
@@ -749,14 +965,7 @@ function renderTable(job) {
     const timeLabel = line.start_time && line.end_time ? `${line.start_time} - ${line.end_time}` : "-";
     return `
       <tr class="review-row ${escapeHtml(line.status)} ${selectedPosition === line.position ? "is-selected" : ""} ${selectedPositions.has(line.position) ? "is-marked" : ""}" data-row-position="${escapeHtml(String(line.position))}">
-        <td>${escapeHtml(String(line.position + 1))}</td>
-        <td><div class="table-time">${escapeHtml(timeLabel)}</div></td>
-        <td>${statusBadge(line.status)}</td>
-        <td><div class="table-reasons">${renderReasonTags(line.reason_tags)}</div></td>
-        <td><div class="table-copy">${escapeHtml(line.source_text)}</div></td>
-        <td><div class="table-copy ${translated ? "" : "is-empty"}">${translated ? escapeHtml(translated) : `<span>${line.status === "pending" ? "Waiting for translation" : (line.status === "translating" ? "Model is translating this line" : "No translation returned")}</span>`}</div></td>
-        <td><div class="table-reference-summary">${summarizeReferenceInline(line.reference_subtitles)}</div></td>
-        <td>${escapeHtml(String(line.batch_index))}</td>
+        ${columns.map(column => renderReviewTableCell(column.key, line, translated, timeLabel)).join("")}
       </tr>
     `;
   }).join("");
@@ -827,6 +1036,8 @@ function renderSide(job) {
   const instruction = instructionDrafts.get(lineKey(line.position)) ?? "";
   const action = reviewActionMeta(draft, line.translated_text);
   const notes = line.issue?.notes || [];
+  const formattingNeedsAttention = !parseSubtitleFormatting(draft).valid
+    || line.reason_tags.includes("formatting_mismatch");
   sideBody.innerHTML = `
     <div class="panel-head">
       <div>
@@ -843,23 +1054,38 @@ function renderSide(job) {
     ${line.reason_tags.length ? `<div class="review-reason-row">${renderReasonTags(line.reason_tags)}</div>` : ""}
     <div class="review-source-block">
       <div class="mini-eyebrow">Source</div>
-      <p>${escapeHtml(line.source_text)}</p>
+      ${renderSubtitlePreview(line.source_text)}
     </div>
     ${renderReferenceLines(line.reference_subtitles)}
-    <label class="review-edit">
-      <strong>Translation</strong>
-      <textarea id="workspace-translation">${escapeHtml(draft)}</textarea>
-    </label>
-    <label class="review-instruction">
-      <strong>Retranslate Instruction</strong>
-      <input id="workspace-instruction" type="text" value="${escapeHtml(instruction)}" placeholder="Optional instruction for this line only" />
-    </label>
-    ${notes.length ? `<div class="issue-notes">${notes.map(note => `<div>${escapeHtml(note)}</div>`).join("")}</div>` : ""}
-    <div class="review-actions">
-      <button type="button" class="ghost" id="workspace-batch-card">Batch Card</button>
+    <div class="review-translation-block">
+      <div class="mini-eyebrow">Translation</div>
+      <div id="workspace-translation-preview">${draft ? renderSubtitlePreview(draft) : ""}</div>
+    </div>
+    <details class="review-raw-editor" ${formattingNeedsAttention ? "open" : ""}>
+      <summary>
+        <span>Formatting & raw text</span>
+        ${formattingNeedsAttention ? `<span class="subtitle-format-warning">check formatting</span>` : ""}
+      </summary>
+      <label class="review-edit">
+        <span class="sr-only">Raw translation text</span>
+        <textarea id="workspace-translation">${escapeHtml(draft)}</textarea>
+      </label>
+    </details>
+    <div class="review-retranslate-group">
+      <label class="review-instruction">
+        <strong>Retranslate Instruction</strong>
+        <input id="workspace-instruction" type="text" value="${escapeHtml(instruction)}" placeholder="Optional instruction for this line only" />
+      </label>
       <button type="button" class="ghost" id="workspace-retranslate">${job.status === "processing" || job.status === "queued" ? "Queue Retranslate" : "Retranslate"}</button>
+    </div>
+    ${notes.length ? `<div class="issue-notes">${notes.map(note => `<div>${escapeHtml(note)}</div>`).join("")}</div>` : ""}
+    <div class="review-actions review-decision-bar">
       <button type="button" id="workspace-save" data-mode="${escapeHtml(action.mode)}">${escapeHtml(action.label)}</button>
-      <button type="button" class="ghost" id="workspace-remove">Remove Subtitle</button>
+      <button type="button" class="ghost" id="workspace-batch-card">Batch Card</button>
+      <details class="review-more-actions">
+        <summary title="More actions" aria-label="More actions">•••</summary>
+        <div><button type="button" class="danger ghost" id="workspace-remove">Remove Subtitle</button></div>
+      </details>
     </div>
   `;
 }
@@ -907,8 +1133,9 @@ async function fetchJob() {
   const isEditing = activeEditor && (
     activeEditor.closest(".review-header") ||
     activeEditor.closest(".review-side-body") ||
+    activeEditor.closest(".review-column-menu") ||
     activeEditor.closest("#review-snapshot-dialog")
-  );
+  ) || Boolean(resizingColumn);
   if (!isEditing) {
     restoreReviewUiState();
     renderAll();
@@ -1364,6 +1591,87 @@ document.addEventListener("click", (event) => {
   }
 });
 
+document.addEventListener("change", (event) => {
+  const toggle = event.target.closest("[data-column-visible]");
+  if (!toggle) return;
+  const key = toggle.dataset.columnVisible;
+  const column = reviewColumnState.find(item => item.key === key);
+  if (!column) return;
+  if (!toggle.checked && visibleReviewColumns().length <= 1) {
+    toggle.checked = true;
+    return;
+  }
+  column.visible = Boolean(toggle.checked);
+  saveReviewColumnState();
+  if (currentJob) renderTable(currentJob);
+});
+
+columnResetBtn?.addEventListener("click", () => {
+  reviewColumnState = defaultReviewColumnState();
+  saveReviewColumnState();
+  if (currentJob) renderTable(currentJob);
+});
+
+document.addEventListener("dragstart", (event) => {
+  const header = event.target.closest("[data-column-header]");
+  if (!header || event.target.closest("[data-column-resize]")) return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", header.dataset.columnHeader || "");
+  header.classList.add("is-dragging");
+});
+
+document.addEventListener("dragend", (event) => {
+  event.target.closest("[data-column-header]")?.classList.remove("is-dragging");
+});
+
+document.addEventListener("dragover", (event) => {
+  if (event.target.closest("[data-column-header]")) event.preventDefault();
+});
+
+document.addEventListener("drop", (event) => {
+  const targetHeader = event.target.closest("[data-column-header]");
+  if (!targetHeader) return;
+  event.preventDefault();
+  const sourceKey = event.dataTransfer.getData("text/plain");
+  const targetKey = targetHeader.dataset.columnHeader;
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+  const sourceIndex = reviewColumnState.findIndex(item => item.key === sourceKey);
+  const targetIndex = reviewColumnState.findIndex(item => item.key === targetKey);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  const [column] = reviewColumnState.splice(sourceIndex, 1);
+  reviewColumnState.splice(targetIndex, 0, column);
+  saveReviewColumnState();
+  if (currentJob) renderTable(currentJob);
+});
+
+document.addEventListener("pointerdown", (event) => {
+  const handle = event.target.closest("[data-column-resize]");
+  if (!handle) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const key = handle.dataset.columnResize;
+  const column = reviewColumnState.find(item => item.key === key);
+  if (!column) return;
+  resizingColumn = { key, startX: event.clientX, startWidth: column.width };
+  document.body.classList.add("is-resizing-review-column");
+  handle.setPointerCapture?.(event.pointerId);
+});
+
+window.addEventListener("pointermove", (event) => {
+  if (!resizingColumn) return;
+  const column = reviewColumnState.find(item => item.key === resizingColumn.key);
+  if (!column) return;
+  column.width = Math.max(48, Math.min(720, resizingColumn.startWidth + event.clientX - resizingColumn.startX));
+  renderTableStructure();
+});
+
+window.addEventListener("pointerup", () => {
+  if (!resizingColumn) return;
+  resizingColumn = null;
+  document.body.classList.remove("is-resizing-review-column");
+  saveReviewColumnState();
+});
+
 document.addEventListener("input", (event) => {
   if (event.target.id === "workspace-translation" && selectedPosition !== null) {
     lineDrafts.set(lineKey(selectedPosition), event.target.value);
@@ -1373,6 +1681,8 @@ document.addEventListener("input", (event) => {
       saveButton.textContent = action.label;
       saveButton.dataset.mode = action.mode;
     }
+    const preview = document.getElementById("workspace-translation-preview");
+    if (preview) preview.innerHTML = event.target.value ? renderSubtitlePreview(event.target.value) : "";
     return;
   }
   if (event.target.id === "workspace-instruction" && selectedPosition !== null) {

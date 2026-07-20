@@ -63,12 +63,17 @@ AI SubContext is a local FastAPI application with a vanilla HTML/CSS/JavaScript 
 
 Validation covers structural errors, empty/unchanged output, likely source-language leakage, target-language consistency, proper-name false positives, and subtitle boundary drift.
 
+Inline subtitle styling is program-owned. Supported SRT tags are replaced with neutral immutable markers before model calls, restored afterward, and validated for balanced source-compatible formatting. Validation operates on visible text without markup. Sustained neighboring-cue shifts are detected from run-level alignment and retried in small anchored groups.
+
 Recovery order:
 
-1. Retry the batch with stricter instructions.
-2. Split a persistently failing batch.
-3. Retry strongly suspicious lines individually.
+1. Publish the initial batch result immediately so valid and failed lines are visible live.
+2. Retry only failed positions once without context updates or adaptive visual doubts.
+3. Retry at most four remaining strong failures individually.
 4. Preserve unresolved findings for manual review.
+5. Split batches only after timeouts, not semantic validation failures.
+
+Model output must contain exactly the expected positions. Missing or duplicate positions become explicit blank/error lines and must never silently fall back to source text.
 
 Common finding states are `suspect`, `error`, `auto_fixed`, and `manual_fixed`.
 

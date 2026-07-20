@@ -67,6 +67,8 @@ Right now, testing has been centered on [LM Studio](https://lmstudio.ai/) using 
 
 - dedicated Review Workspace with table-style line review
 - suspect / fixed / error counters and filters
+- live pending, translating, retrying, missing, and provisional line states while a batch is still running
+- program-owned subtitle color/font restoration, malformed-format detection, and neighboring-cue drift recovery
 - per-line save, resolve, remove, and retranslate actions
 - optional extra instruction when retranslating a line
 - access batch cards directly from review flows

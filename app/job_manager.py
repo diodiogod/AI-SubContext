@@ -128,6 +128,9 @@ class JobManager:
         elif job.status == JobStatus.PAUSED:
             job.message = job.message or "Paused and ready to resume"
         job.completed_at = job.completed_at if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED} else None
+        job.active_batch_index = None
+        job.active_batch_positions = []
+        job.active_recovery_positions = []
         return job
 
     def _load_state(self) -> None:
@@ -1549,6 +1552,10 @@ class JobManager:
 
                 current_context = deepcopy(job.session_context) if job.session_context else None
                 batch_started = time.monotonic()
+                batch_positions = [line.position for line in batches[batch_index]]
+                job.active_batch_index = batch_index + 1
+                job.active_batch_positions = batch_positions
+                job.active_recovery_positions = []
                 self._append_log(
                     job,
                     "info",
@@ -1556,7 +1563,23 @@ class JobManager:
                     batch_index=batch_index + 1,
                     save=False,
                 )
-                batch_positions = [line.position for line in batches[batch_index]]
+
+                def publish_partial_batch(
+                    lines: list[SubtitleLine],
+                    issues: list[SubtitleValidationIssue],
+                    stage: str,
+                    recovery_positions: list[int],
+                ) -> None:
+                    for line in lines:
+                        translated_by_position[line.position] = line
+                    job.translated_lines = [
+                        translated_by_position[position]
+                        for position in sorted(translated_by_position)
+                    ]
+                    self._merge_validation_issues(job, issues)
+                    job.active_recovery_positions = list(dict.fromkeys(recovery_positions))
+                    job.message = f"Batch {batch_index + 1}: {stage}"
+
                 translated_batch, updated_context, batch_stats = await self.translator.translate_batch(
                     job.settings,
                     batches[batch_index],
@@ -1573,7 +1596,9 @@ class JobManager:
                         level,
                         message,
                         batch_index=batch_no,
+                        save=False,
                     ),
+                    partial_update=publish_partial_batch,
                 )
                 if job.settings.adaptive_vision and job.video_path:
                     translated_batch = await self._apply_adaptive_vision(
@@ -1599,6 +1624,9 @@ class JobManager:
                     self._record_context(job, updated_context)
 
                 job.current_batch = batch_index + 1
+                job.active_batch_index = None
+                job.active_batch_positions = []
+                job.active_recovery_positions = []
                 job.progress = int((job.current_batch / len(batches)) * 100)
                 self._record_batch_timing(
                     job,
@@ -1641,6 +1669,9 @@ class JobManager:
 
             await self._process_pending_retranslations(job, "job end")
             job.translated_srt = compose_translated_srt(subtitles, job.translated_lines)
+            job.active_batch_index = None
+            job.active_batch_positions = []
+            job.active_recovery_positions = []
             job.status = JobStatus.COMPLETED
             job.progress = 100
             job.eta_seconds = None
@@ -1650,6 +1681,9 @@ class JobManager:
             self._append_log(job, "info", "Translation completed", save=False)
             self._save_state()
         except (asyncio.CancelledError, TranslationStopRequested):
+            job.active_batch_index = None
+            job.active_batch_positions = []
+            job.active_recovery_positions = []
             if job.stop_requested:
                 job.status = JobStatus.CANCELLED
                 job.completed_at = datetime.now(timezone.utc)
@@ -1661,6 +1695,9 @@ class JobManager:
                 return
             raise
         except Exception as exc:
+            job.active_batch_index = None
+            job.active_batch_positions = []
+            job.active_recovery_positions = []
             error_text = str(exc).strip() or exc.__class__.__name__
             job.status = JobStatus.FAILED
             job.error = error_text

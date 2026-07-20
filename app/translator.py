@@ -10,6 +10,7 @@ import shutil
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -30,6 +31,12 @@ from app.models import (
     VisualSceneContext,
 )
 from app.srt_utils import chunk_lines
+from app.subtitle_formatting import (
+    protect_subtitle_formatting,
+    restore_subtitle_formatting,
+    strip_subtitle_formatting,
+    subtitle_formatting_matches,
+)
 from app.vision import ExtractedVisualFrame
 
 logger = logging.getLogger(__name__)
@@ -135,7 +142,9 @@ DEFAULT_TRANSLATION_SYSTEM_PROMPT = (
     "The primary subtitle text is always the canonical source. "
     "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
     "forward or backward across positions, even if the sentence continues across multiple subtitles. "
-    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible."
+    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible. "
+    "Some source lines contain immutable markers such as [[SUBFMT_0]] and [[SUBBR_0]]. They represent program-owned styling and line breaks, not text. "
+    "Copy every marker exactly once, unchanged and in the same order, around the translation of the text it originally surrounds."
 )
 
 REFERENCE_EVIDENCE_INSTRUCTION = (
@@ -261,6 +270,58 @@ _LEGACY_DEFAULT_PROMPTS = {
     ),
 }
 
+_OLDER_TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert subtitle translator. Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
+    "Return JSON only. Also return a compact state_update for future batches. Do not explain your reasoning, do not think "
+    "out loud, and do not include analysis or commentary outside the JSON object. Use character gender only as a grammar "
+    "hint and prefer unknown over guessing. The primary subtitle text is always the canonical source. If reference_subtitles "
+    "are present for a line, they are supporting aligned subtitles from other languages. Use them to clarify ambiguity, but "
+    "do not follow them blindly and do not change line count or order because of them. For state_update: keep premise as stable "
+    "whole-title context, but make scene_context specific to the current batch only. Keep state_update compact and factual. "
+    "Do not repeat a broad movie synopsis in scene_context if the current lines are about a narrower exchange, location, or action beat."
+)
+
+_PRE_FORMATTING_TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert subtitle translator from {{source_language}} into {{target_language}}. "
+    "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
+    "Return JSON only. "
+    "Do not explain your reasoning, do not think out loud, and do not include analysis or commentary outside the JSON object. "
+    "Use character gender only as a grammar hint and prefer unknown over guessing. "
+    "The primary subtitle text is always the canonical source. "
+    "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
+    "forward or backward across positions, even if the sentence continues across multiple subtitles. "
+    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible."
+)
+
+_PRE_LINE_BREAK_TRANSLATION_SYSTEM_PROMPT = (
+    "You are an expert subtitle translator from {{source_language}} into {{target_language}}. "
+    "Translate naturally, preserve subtitle meaning, punctuation, and line intent. "
+    "Return JSON only. "
+    "Do not explain your reasoning, do not think out loud, and do not include analysis or commentary outside the JSON object. "
+    "Use character gender only as a grammar hint and prefer unknown over guessing. "
+    "The primary subtitle text is always the canonical source. "
+    "Each output line must translate only its matching source line. Never merge adjacent subtitle lines or shift text "
+    "forward or backward across positions, even if the sentence continues across multiple subtitles. "
+    "Preserve boundary cues like opening or closing quotes and leading dialogue dashes on the correct subtitle line whenever possible. "
+    "Some source lines contain immutable markers such as [[SUBFMT_0]]. They represent program-owned subtitle styling, not text. "
+    "Copy every marker exactly once, unchanged and in the same order, around the translation of the text it originally surrounds."
+)
+
+_LEGACY_DEFAULT_PROMPT_VARIANTS = {
+    field_name: (prompt,)
+    for field_name, prompt in _LEGACY_DEFAULT_PROMPTS.items()
+}
+_LEGACY_DEFAULT_PROMPT_VARIANTS["prompt_translation_system"] += (
+    _OLDER_TRANSLATION_SYSTEM_PROMPT,
+    _PRE_FORMATTING_TRANSLATION_SYSTEM_PROMPT,
+    _PRE_LINE_BREAK_TRANSLATION_SYSTEM_PROMPT,
+)
+_LEGACY_DEFAULT_PROMPT_VARIANTS["prompt_translation_strict_retry"] = (
+    "Validation warning: previous output may have left lines untranslated or in the source language. "
+    "Translate every line fully into the target language. Do not keep source-language text unless it is a proper name "
+    "or a term explicitly marked to keep in the context glossary. Preserve line order and return all positions.",
+)
+
 
 def _prompt_fingerprint(value: str) -> str:
     fingerprint = 2166136261
@@ -338,6 +399,9 @@ class BatchValidationResult:
     suspicious_positions: list[int]
     detected_language: str | None
     reason: str
+    boundary_positions: list[int] = field(default_factory=list)
+    sequence_drift_positions: list[int] = field(default_factory=list)
+    formatting_positions: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -363,6 +427,12 @@ class BatchProcessingStats:
 
 LogEvent = Callable[[str, str], None]
 StopCheck = Callable[[], bool]
+PartialBatchUpdate = Callable[
+    [list[SubtitleLine], list[SubtitleValidationIssue], str, list[int]],
+    None,
+]
+
+MAX_ISOLATED_REPAIRS_PER_BATCH = 4
 
 _META_STYLE_NOTE_PATTERNS = (
     "prefer unknown",
@@ -488,7 +558,10 @@ def _extract_json_blob(text: str) -> dict[str, Any]:
 
 
 def _clean_subtitle_block_text(value: str) -> str:
-    parts = [" ".join(part.split()) for part in str(value or "").splitlines()]
+    parts = [
+        " ".join(part.split())
+        for part in strip_subtitle_formatting(str(value or "")).splitlines()
+    ]
     return "\n".join(part for part in parts if part).strip()
 
 
@@ -700,7 +773,7 @@ def _render_prompt_template(template: str, settings: TranslationSettings) -> str
 
 def _effective_prompt(settings: TranslationSettings, field_name: str, default_value: str) -> str:
     override = str(getattr(settings, field_name, "") or "").strip()
-    if override == _LEGACY_DEFAULT_PROMPTS.get(field_name):
+    if override in _LEGACY_DEFAULT_PROMPT_VARIANTS.get(field_name, ()):
         override = ""
     rendered = _render_prompt_template(override or default_value, settings)
     variables = _prompt_template_variables(settings)
@@ -734,6 +807,21 @@ def _dynamic_reference_instruction(
     reference_languages = ", ".join(labels) if labels else "an unspecified reference language"
     template = REFERENCE_EVIDENCE_INSTRUCTION.replace("{reference_languages}", reference_languages)
     return _render_prompt_template(template, settings)
+
+
+def _visual_contexts_for_batch_lines(
+    batch_lines: list[SubtitleLine],
+    visual_scene_contexts: list[VisualSceneContext] | None,
+) -> list[VisualSceneContext]:
+    if not batch_lines or not visual_scene_contexts:
+        return []
+    start_position = min(line.position for line in batch_lines)
+    end_position = max(line.position for line in batch_lines)
+    return [
+        context
+        for context in visual_scene_contexts
+        if context.end_position >= start_position and context.start_position <= end_position
+    ]
 
 
 def _effective_timeout_seconds(settings: TranslationSettings) -> int:
@@ -826,19 +914,28 @@ def _session_context_schema() -> dict[str, Any]:
     }
 
 
-def _translation_schema(*, include_state_update: bool = True) -> dict[str, Any]:
+def _translation_schema(
+    *,
+    include_state_update: bool = True,
+    expected_positions: list[int] | None = None,
+) -> dict[str, Any]:
+    expected_positions = list(dict.fromkeys(expected_positions or []))
+    position_schema: dict[str, Any] = {"type": "integer"}
+    if expected_positions:
+        position_schema["enum"] = expected_positions
     schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "translations": {
                 "type": "array",
-                "maxItems": 100,
+                "minItems": len(expected_positions) if expected_positions else 1,
+                "maxItems": len(expected_positions) if expected_positions else 100,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "position": {"type": "integer"},
+                        "position": position_schema,
                         "text": {"type": "string", "maxLength": 500},
                     },
                     "required": ["position", "text"],
@@ -853,8 +950,15 @@ def _translation_schema(*, include_state_update: bool = True) -> dict[str, Any]:
     return schema
 
 
-def _adaptive_translation_schema(*, include_state_update: bool = True) -> dict[str, Any]:
-    schema = _translation_schema(include_state_update=include_state_update)
+def _adaptive_translation_schema(
+    *,
+    include_state_update: bool = True,
+    expected_positions: list[int] | None = None,
+) -> dict[str, Any]:
+    schema = _translation_schema(
+        include_state_update=include_state_update,
+        expected_positions=expected_positions,
+    )
     schema["properties"]["visual_doubts"] = {
         "type": "array",
         "maxItems": 3,
@@ -1057,7 +1161,7 @@ def _normalize_language_code(value: str | None) -> str:
 
 
 def _normalize_text(value: str) -> str:
-    return " ".join(str(value or "").strip().split())
+    return " ".join(strip_subtitle_formatting(str(value or "")).strip().split())
 
 
 def _word_tokens(value: str) -> list[str]:
@@ -1133,7 +1237,7 @@ def _line_looks_untranslated(
 
 
 def _line_boundary_markers(text: str) -> dict[str, bool]:
-    stripped = text.strip()
+    stripped = strip_subtitle_formatting(text).strip()
     if not stripped:
         return {
             "leading_dash": False,
@@ -1170,18 +1274,74 @@ def _boundary_drift_positions(
     return sorted(flagged)
 
 
+def _visible_alphanumeric_count(value: str) -> int:
+    return max(1, sum(char.isalnum() for char in strip_subtitle_formatting(value)))
+
+
+def _sequence_drift_positions(
+    batch_lines: list[SubtitleLine],
+    translated_lines: list[SubtitleLine],
+) -> list[int]:
+    """Detect runs whose target lengths align much better one cue away.
+
+    This is intentionally a run-level detector. A single concise or expanded
+    translation is normal; a sustained one-position alignment is the signature
+    of the model shifting dialogue forward or backward across subtitle cues.
+    """
+    paired = list(zip(batch_lines, translated_lines, strict=False))
+    window_size = min(8, len(paired))
+    if window_size < 5:
+        return []
+
+    source_lengths = [_visible_alphanumeric_count(source.text) for source, _ in paired]
+    target_lengths = [_visible_alphanumeric_count(translated.text) for _, translated in paired]
+    flagged_indices: set[int] = set()
+
+    for start in range(0, len(paired) - window_size + 1):
+        end = start + window_size
+        local_ratios = [
+            target_lengths[index] / source_lengths[index]
+            for index in range(start, end)
+        ]
+        typical_ratio = max(0.1, median(local_ratios))
+
+        def alignment_cost(offset: int) -> float:
+            costs: list[float] = []
+            for index in range(start, end):
+                source_index = index + offset
+                if source_index < 0 or source_index >= len(paired):
+                    continue
+                ratio = target_lengths[index] / source_lengths[source_index]
+                costs.append(abs(math.log(max(0.01, ratio / typical_ratio))))
+            return sum(costs) / max(1, len(costs))
+
+        direct_cost = alignment_cost(0)
+        shifted_cost = min(alignment_cost(-1), alignment_cost(1))
+        if direct_cost > 0.5 and shifted_cost < 0.4 and shifted_cost < direct_cost * 0.6:
+            flagged_indices.update(range(start, end))
+
+    return [paired[index][0].position for index in sorted(flagged_indices)]
+
+
 def _line_has_strong_failure_signal(
     settings: TranslationSettings,
     source_text: str,
     translated_text: str,
     validation: BatchValidationResult | None = None,
     session_context: SessionContext | None = None,
+    position: int | None = None,
 ) -> bool:
     source = _normalize_text(source_text)
     translated = _normalize_text(translated_text)
     source_code = _normalize_language_code(settings.source_language)
 
     if not translated:
+        return True
+    if validation and position is not None and position in {
+        *validation.boundary_positions,
+        *validation.sequence_drift_positions,
+        *validation.formatting_positions,
+    }:
         return True
     if len(source) >= 8 and source.casefold() == translated.casefold():
         if _looks_like_unchanged_proper_name(source, translated, session_context):
@@ -1252,7 +1412,18 @@ def _validate_translated_batch(
         if _line_looks_untranslated(source.text, translated.text, session_context)
     ]
     boundary_positions = _boundary_drift_positions(batch_lines, translated_lines)
-    suspicious_positions = sorted(set(untranslated_positions) | set(boundary_positions))
+    sequence_drift_positions = _sequence_drift_positions(batch_lines, translated_lines)
+    formatting_positions = [
+        source.position
+        for source, translated in zip(batch_lines, translated_lines, strict=False)
+        if not subtitle_formatting_matches(source.text, translated.text)
+    ]
+    suspicious_positions = sorted(
+        set(untranslated_positions)
+        | set(boundary_positions)
+        | set(sequence_drift_positions)
+        | set(formatting_positions)
+    )
     translated_batch_text = " ".join(
         translated.text for translated in translated_lines if _alpha_character_count(translated.text) >= 4
     )
@@ -1266,6 +1437,15 @@ def _validate_translated_batch(
     if boundary_positions and len(boundary_positions) >= 2:
         failed = True
         reasons.append(f"possible subtitle boundary drift: {boundary_positions[:5]}")
+    if sequence_drift_positions:
+        failed = True
+        reasons.append(
+            "probable neighboring-cue translation shift: "
+            f"{sequence_drift_positions[:8]}"
+        )
+    if formatting_positions:
+        failed = True
+        reasons.append(f"subtitle formatting mismatch: {formatting_positions[:8]}")
     if detected_language == source_code:
         failed = True
         reasons.append(f"batch output still looks like source language '{source_code}'")
@@ -1275,6 +1455,9 @@ def _validate_translated_batch(
         suspicious_positions=suspicious_positions,
         detected_language=detected_language,
         reason="; ".join(reasons),
+        boundary_positions=boundary_positions,
+        sequence_drift_positions=sequence_drift_positions,
+        formatting_positions=formatting_positions,
     )
 
 
@@ -1298,8 +1481,22 @@ def _validation_notes(
     flagged_positions: list[int],
 ) -> list[str]:
     notes: list[str] = []
-    if flagged_positions:
+    structural_positions = {
+        *validation.boundary_positions,
+        *validation.sequence_drift_positions,
+        *validation.formatting_positions,
+    }
+    untranslated_only = [
+        position for position in flagged_positions if position not in structural_positions
+    ]
+    if untranslated_only:
         notes.append("Line still looks untranslated or too close to the source text.")
+    if validation.formatting_positions:
+        notes.append("Program-owned subtitle formatting was missing, malformed, or changed.")
+    if validation.sequence_drift_positions:
+        notes.append("Translation content appears shifted into a neighboring subtitle cue.")
+    elif validation.boundary_positions:
+        notes.append("Subtitle boundary punctuation may have moved between cues.")
     source_code = _normalize_language_code(settings.source_language)
     if validation.detected_language and validation.detected_language == source_code:
         notes.append(f"Batch output still looks like source language '{source_code}'.")
@@ -1327,6 +1524,7 @@ def _strong_repair_positions(
             translated_by_position.get(position, ""),
             validation,
             session_context,
+            position,
         )
     ]
 
@@ -1338,6 +1536,7 @@ def _reason_codes_for_line(
     validation: BatchValidationResult | None = None,
     session_context: SessionContext | None = None,
     *,
+    position: int | None = None,
     status: str = "suspect",
     extra_codes: list[str] | None = None,
 ) -> list[str]:
@@ -1356,6 +1555,14 @@ def _reason_codes_for_line(
         codes.append("unchanged_from_source")
     elif _line_looks_untranslated(source, translated, session_context):
         codes.append("source_language_leak")
+
+    if not subtitle_formatting_matches(source_text, translated_text):
+        codes.append("formatting_mismatch")
+    if validation and position is not None:
+        if position in validation.sequence_drift_positions:
+            codes.append("boundary_sequence_drift")
+        elif position in validation.boundary_positions:
+            codes.append("boundary_drift")
 
     if validation and validation.detected_language and validation.detected_language == source_code:
         codes.append("validator_language_mismatch")
@@ -1400,6 +1607,7 @@ def _build_validation_issues(
                 translated_by_position.get(position, ""),
                 validation,
                 session_context,
+                position=position,
                 status=status,
                 extra_codes=extra_codes,
             ),
@@ -1424,8 +1632,8 @@ class OpenAICompatibleTranslator:
             "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             **PROMPT_DEFAULTS,
             "legacy_prompt_fingerprints": {
-                field_name: _prompt_fingerprint(prompt)
-                for field_name, prompt in _LEGACY_DEFAULT_PROMPTS.items()
+                field_name: [_prompt_fingerprint(prompt) for prompt in prompts]
+                for field_name, prompts in _LEGACY_DEFAULT_PROMPT_VARIANTS.items()
             },
         }
 
@@ -1737,7 +1945,7 @@ class OpenAICompatibleTranslator:
                     "position": line.position,
                     "start_time": line.start_time,
                     "end_time": line.end_time,
-                    "text": line.text,
+                    "text": strip_subtitle_formatting(line.text),
                 }
                 for line in scene_lines
             ],
@@ -1850,7 +2058,10 @@ class OpenAICompatibleTranslator:
         max_lines: int = 120,
         log_event: LogEvent | None = None,
     ) -> SessionContext:
-        snippet = [{"position": line.position, "text": line.text} for line in lines[:max_lines]]
+        snippet = [
+            {"position": line.position, "text": strip_subtitle_formatting(line.text)}
+            for line in lines[:max_lines]
+        ]
         base = deepcopy(base_context) if base_context else SessionContext(
             movie_title=settings.title,
             source_language=settings.source_language,
@@ -1945,6 +2156,7 @@ class OpenAICompatibleTranslator:
                             source_by_position.get(position, ""),
                             translated_by_position.get(position, ""),
                             validation,
+                            position=position,
                             status="suspect",
                         ),
                         notes=notes,
@@ -1992,16 +2204,21 @@ class OpenAICompatibleTranslator:
         reference_subtitles_by_position: dict[int, list[dict[str, Any]]] | None = None,
         visual_scene_contexts: list[VisualSceneContext] | None = None,
         allow_visual_doubts: bool = False,
+        include_state_update: bool | None = None,
         extra_instruction: str = "",
         log_event: LogEvent | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, list[VisualDoubt]]:
+        include_state_update = settings.structured_context if include_state_update is None else include_state_update
+        visual_scene_contexts = _visual_contexts_for_batch_lines(batch_lines, visual_scene_contexts)
         context_payload = session_context.model_dump() if session_context else {}
         line_payload = []
+        source_by_position = {line.position: line for line in batch_lines}
         reference_count = 0
         for line in batch_lines:
+            protected = protect_subtitle_formatting(line.text)
             item = {
                 "position": line.position,
-                "text": line.text,
+                "text": protected.model_text,
             }
             if allow_visual_doubts:
                 item["start_time"] = line.start_time
@@ -2009,13 +2226,19 @@ class OpenAICompatibleTranslator:
             references = (reference_subtitles_by_position or {}).get(line.position) or []
             if references:
                 reference_count += len(references)
-                item["reference_subtitles"] = references
+                item["reference_subtitles"] = [
+                    {
+                        **reference,
+                        "text": strip_subtitle_formatting(str(reference.get("text", ""))),
+                    }
+                    for reference in references
+                ]
             line_payload.append(item)
         active_prompt_blocks: list[str] = []
         instruction_parts = [
             _effective_prompt(settings, "prompt_translation_system", DEFAULT_TRANSLATION_SYSTEM_PROMPT)
         ]
-        if settings.structured_context:
+        if include_state_update:
             instruction_parts.append(_render_prompt_template(STATE_UPDATE_INSTRUCTION, settings))
             active_prompt_blocks.append("rolling context")
         reference_instruction = _dynamic_reference_instruction(settings, reference_subtitles_by_position)
@@ -2041,7 +2264,7 @@ class OpenAICompatibleTranslator:
             **_language_prompt_payload(settings),
             "lines": line_payload,
         }
-        if settings.structured_context:
+        if include_state_update:
             user_payload["session_context"] = context_payload
         if visual_scene_contexts:
             user_payload["visual_scene_context"] = [
@@ -2069,7 +2292,7 @@ class OpenAICompatibleTranslator:
                     messages,
                     {
                         "system": system_instruction,
-                        "context": _json_for_prompt_size(context_payload),
+                        "context": _json_for_prompt_size(context_payload) if include_state_update else "",
                         "vision": _json_for_prompt_size(
                             [item.model_dump() for item in (visual_scene_contexts or [])]
                         ),
@@ -2085,27 +2308,75 @@ class OpenAICompatibleTranslator:
             messages,
             "adaptive_translation_batch" if allow_visual_doubts else "translation_batch",
             (
-                _adaptive_translation_schema(include_state_update=settings.structured_context)
+                _adaptive_translation_schema(
+                    include_state_update=include_state_update,
+                    expected_positions=[line.position for line in batch_lines],
+                )
                 if allow_visual_doubts
-                else _translation_schema(include_state_update=settings.structured_context)
+                else _translation_schema(
+                    include_state_update=include_state_update,
+                    expected_positions=[line.position for line in batch_lines],
+                )
             ),
             log_event=log_event,
         )
-        translations = [
-            SubtitleLine(position=int(item["position"]), text=str(item["text"]))
-            for item in data.get("translations", [])
+        expected_positions = {line.position for line in batch_lines}
+        translated_by_position: dict[int, SubtitleLine] = {}
+        duplicate_positions: set[int] = set()
+        unexpected_positions: set[int] = set()
+        for item in data.get("translations", []):
+            position = int(item["position"])
+            if position not in expected_positions:
+                unexpected_positions.add(position)
+                continue
+            if position in translated_by_position:
+                duplicate_positions.add(position)
+            translated_by_position[position] = SubtitleLine(
+                position=position,
+                text=restore_subtitle_formatting(
+                    source_by_position[position].text,
+                    str(item["text"]),
+                ),
+            )
+        for position in duplicate_positions:
+            translated_by_position.pop(position, None)
+        missing_positions = sorted(expected_positions - translated_by_position.keys())
+        if log_event and (missing_positions or duplicate_positions or unexpected_positions):
+            details = []
+            if missing_positions:
+                details.append(f"missing positions {missing_positions[:12]}")
+            if duplicate_positions:
+                details.append(f"duplicate positions {sorted(duplicate_positions)[:12]}")
+            if unexpected_positions:
+                details.append(f"unexpected positions {sorted(unexpected_positions)[:12]}")
+            log_event("warn", "Malformed translation structure: " + "; ".join(details))
+        ordered = [
+            translated_by_position.get(line.position, SubtitleLine(position=line.position, text=""))
+            for line in batch_lines
         ]
-        translated_by_position = {line.position: line for line in translations}
-        ordered = [translated_by_position.get(line.position, line) for line in batch_lines]
         merged_context = (
             merge_session_context(session_context, data.get("state_update") or {})
-            if settings.structured_context
+            if include_state_update
             else session_context
         )
         visual_doubts: list[VisualDoubt] = []
         if allow_visual_doubts:
             for item in data.get("visual_doubts") or []:
                 try:
+                    position = int(item.get("position"))
+                    source = source_by_position.get(position)
+                    if source is not None:
+                        item = {
+                            **item,
+                            "current_translation": restore_subtitle_formatting(
+                                source.text,
+                                str(item.get("current_translation", "")),
+                            ),
+                            "alternative_translation": restore_subtitle_formatting(
+                                source.text,
+                                str(item.get("alternative_translation", "")),
+                            ),
+                        }
                     visual_doubts.append(VisualDoubt.model_validate(item))
                 except Exception:
                     continue
@@ -2133,7 +2404,7 @@ class OpenAICompatibleTranslator:
             doubtful_lines.append(
                 {
                     "position": doubt.position,
-                    "source_text": source.text,
+                    "source_text": strip_subtitle_formatting(source.text),
                     "start_time": source.start_time,
                     "end_time": source.end_time,
                     "provisional_translation": provisional.text,
@@ -2153,7 +2424,7 @@ class OpenAICompatibleTranslator:
         dialogue_context = [
             {
                 "position": line.position,
-                "text": line.text,
+                "text": strip_subtitle_formatting(line.text),
                 "start_time": line.start_time,
                 "end_time": line.end_time,
             }
@@ -2293,15 +2564,29 @@ class OpenAICompatibleTranslator:
                 "Additional instruction: "
                 + _render_prompt_template(extra_instruction.strip(), settings)
             )
+        instruction_parts.append(
+            "Copy every [[SUBFMT_N]] and [[SUBBR_N]] marker from source_text exactly once, unchanged and in the same order."
+        )
         system_instruction = _with_target_language_tips(" ".join(instruction_parts), settings)
 
+        protected_source = protect_subtitle_formatting(source_line.text)
         line_payload: dict[str, Any] = {
             "position": source_line.position,
-            "source_text": source_line.text,
-            "current_translation": current_translation.text if current_translation else "",
+            "source_text": protected_source.model_text,
+            "current_translation": (
+                strip_subtitle_formatting(current_translation.text)
+                if current_translation
+                else ""
+            ),
         }
         if reference_subtitles:
-            line_payload["reference_subtitles"] = reference_subtitles
+            line_payload["reference_subtitles"] = [
+                {
+                    **reference,
+                    "text": strip_subtitle_formatting(str(reference.get("text", ""))),
+                }
+                for reference in reference_subtitles
+            ]
 
         messages = [
             {
@@ -2330,7 +2615,10 @@ class OpenAICompatibleTranslator:
             _single_line_revision_schema(),
             log_event=log_event,
         )
-        revised_line = SubtitleLine(position=source_line.position, text=str(data.get("text", "")))
+        revised_line = SubtitleLine(
+            position=source_line.position,
+            text=restore_subtitle_formatting(source_line.text, str(data.get("text", ""))),
+        )
         validation = _validate_translated_batch(settings, [source_line], [revised_line], session_context)
         flagged_positions = _flagged_positions(validation, [source_line], settings)
         if flagged_positions:
@@ -2389,6 +2677,7 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         should_stop: StopCheck | None = None,
+        partial_update: PartialBatchUpdate | None = None,
     ) -> tuple[list[SubtitleLine], BatchProcessingStats]:
         _raise_if_stop_requested(should_stop)
         if not suspicious_positions:
@@ -2430,19 +2719,18 @@ class OpenAICompatibleTranslator:
                 translated_by_position[position] = retried_line
                 repair_stats.error_count += 1
                 notes = _validation_notes(retried_validation, settings, flagged_positions)
-                repair_stats.issues.extend(
-                    _build_validation_issues(
-                        settings,
-                        "error",
-                        flagged_positions,
-                        [source_line],
-                        [retried_line],
-                        batch_index,
-                        notes,
-                        validation=retried_validation,
-                        session_context=session_context,
-                    )
+                line_issues = _build_validation_issues(
+                    settings,
+                    "error",
+                    flagged_positions,
+                    [source_line],
+                    [retried_line],
+                    batch_index,
+                    notes,
+                    validation=retried_validation,
+                    session_context=session_context,
                 )
+                repair_stats.issues.extend(line_issues)
                 if log_event:
                     log_event(
                         "error",
@@ -2451,21 +2739,32 @@ class OpenAICompatibleTranslator:
             else:
                 repair_stats.fixed_count += 1
                 translated_by_position[position] = retried_line
-                repair_stats.issues.extend(
-                    _build_validation_issues(
-                        settings,
-                        "auto_fixed",
-                        [position],
-                        [source_line],
-                        [retried_line],
-                        batch_index,
-                        ["Validation cleared after isolated retry."],
-                        extra_codes=["isolated_retry"],
-                        session_context=session_context,
-                    )
+                line_issues = _build_validation_issues(
+                    settings,
+                    "auto_fixed",
+                    [position],
+                    [source_line],
+                    [retried_line],
+                    batch_index,
+                    ["Validation cleared after isolated retry."],
+                    extra_codes=["isolated_retry"],
+                    session_context=session_context,
                 )
+                repair_stats.issues.extend(line_issues)
                 if log_event:
                     log_event("info", f"Isolated retry fixed line {position + 1}")
+            if partial_update:
+                remaining_positions = [
+                    item
+                    for item in suspicious_positions
+                    if item > position
+                ]
+                partial_update(
+                    [retried_line],
+                    line_issues,
+                    "isolated repair",
+                    remaining_positions,
+                )
 
         return _ordered_lines_from_map(batch_lines, translated_by_position), repair_stats
 
@@ -2502,7 +2801,7 @@ class OpenAICompatibleTranslator:
             }
 
         nearby = [
-            {"position": line.position, "text": line.text}
+            {"position": line.position, "text": strip_subtitle_formatting(line.text)}
             for line in batch_lines
             if abs(line.position - source_line.position) <= 1
             and line.position != source_line.position
@@ -2512,6 +2811,7 @@ class OpenAICompatibleTranslator:
                 "Translate one subtitle line from {{source_language}} into {{target_language}}. "
                 "Return only JSON with the final text. Preserve proper names unchanged when appropriate. "
                 "Use nearby_lines only as context. Translate only the target line and do not pull text from adjacent subtitle positions. "
+                "Copy every [[SUBFMT_N]] and [[SUBBR_N]] marker from source_text exactly once, unchanged and in the same order. "
                 "Do not update context or explain your reasoning.",
                 settings,
             ),
@@ -2528,13 +2828,24 @@ class OpenAICompatibleTranslator:
         if reference_instruction:
             instruction_parts.append(reference_instruction)
         system_instruction = _with_target_language_tips(" ".join(instruction_parts), settings)
+        protected_source = protect_subtitle_formatting(source_line.text)
         line_payload: dict[str, Any] = {
             "position": source_line.position,
-            "source_text": source_line.text,
-            "current_translation": current_translation.text if current_translation else "",
+            "source_text": protected_source.model_text,
+            "current_translation": (
+                strip_subtitle_formatting(current_translation.text)
+                if current_translation
+                else ""
+            ),
         }
         if reference_subtitles:
-            line_payload["reference_subtitles"] = reference_subtitles
+            line_payload["reference_subtitles"] = [
+                {
+                    **reference,
+                    "text": strip_subtitle_formatting(str(reference.get("text", ""))),
+                }
+                for reference in reference_subtitles
+            ]
         messages = [
             {"role": "system", "content": system_instruction},
             {
@@ -2571,7 +2882,10 @@ class OpenAICompatibleTranslator:
         )
         return SubtitleLine(
             position=source_line.position,
-            text=str(data.get("text") or "").strip(),
+            text=restore_subtitle_formatting(
+                source_line.text,
+                str(data.get("text") or "").strip(),
+            ),
         )
 
     async def _split_batch_and_translate(
@@ -2586,6 +2900,7 @@ class OpenAICompatibleTranslator:
         depth: int = 0,
         reason: str = "Splitting batch",
         should_stop: StopCheck | None = None,
+        partial_update: PartialBatchUpdate | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
         _raise_if_stop_requested(should_stop)
         midpoint = max(1, len(batch_lines) // 2)
@@ -2605,6 +2920,7 @@ class OpenAICompatibleTranslator:
             log_event=log_event,
             depth=depth + 1,
             should_stop=should_stop,
+            partial_update=partial_update,
         )
         _raise_if_stop_requested(should_stop)
         translated_second, context_after_second, second_stats = await self._translate_batch_with_validation(
@@ -2617,6 +2933,7 @@ class OpenAICompatibleTranslator:
             log_event=log_event,
             depth=depth + 1,
             should_stop=should_stop,
+            partial_update=partial_update,
         )
         merged_stats = BatchProcessingStats(retried_batches=1, split_batches=1)
         merged_stats.merge(first_stats).merge(second_stats)
@@ -2633,205 +2950,281 @@ class OpenAICompatibleTranslator:
         log_event: LogEvent | None = None,
         depth: int = 0,
         should_stop: StopCheck | None = None,
+        partial_update: PartialBatchUpdate | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
         _raise_if_stop_requested(should_stop)
-        last_translated: list[SubtitleLine] | None = None
-        last_context: SessionContext | None = session_context
-        last_validation = BatchValidationResult(False, [], None, "")
-        first_failed_positions: list[int] = []
         strict_retry_instruction = _effective_prompt(
             settings,
             "prompt_translation_strict_retry",
             DEFAULT_STRICT_RETRY_PROMPT,
         )
-
-        for attempt_index, extra_instruction in enumerate(("", strict_retry_instruction), start=1):
-            _raise_if_stop_requested(should_stop)
-            if log_event:
-                if attempt_index == 1:
-                    log_event("info", f"Submitting batch to model with {len(batch_lines)} lines")
-                else:
-                    log_event("warn", "Retrying batch with stricter translation instruction")
-            try:
-                translated_lines, merged_context, visual_doubts = await self._translate_batch_once(
-                    settings,
-                    batch_lines,
-                    session_context,
-                    reference_subtitles_by_position=reference_subtitles_by_position,
-                    visual_scene_contexts=visual_scene_contexts,
-                    allow_visual_doubts=bool(getattr(settings, "adaptive_vision", False)),
-                    extra_instruction=extra_instruction,
-                    log_event=log_event,
-                )
-            except ModelRequestTimeout as exc:
-                _raise_if_stop_requested(should_stop)
-                if len(batch_lines) > 1 and depth < 4:
-                    return await self._split_batch_and_translate(
-                        settings,
-                        batch_lines,
-                        session_context,
-                        reference_subtitles_by_position=reference_subtitles_by_position,
-                        visual_scene_contexts=visual_scene_contexts,
-                        batch_index=batch_index,
-                        log_event=log_event,
-                        depth=depth,
-                        reason=_timeout_guidance(exc.seconds),
-                        should_stop=should_stop,
-                    )
-                if log_event:
-                    log_event("error", _timeout_guidance(exc.seconds))
-                raise
-            _raise_if_stop_requested(should_stop)
-            validation = _validate_translated_batch(
-                settings,
-                batch_lines,
-                translated_lines,
-                merged_context,
-            )
-            flagged_positions = _flagged_positions(validation, batch_lines, settings)
-            if log_event:
-                detection_note = (
-                    f"detected output language: {validation.detected_language}"
-                    if validation.detected_language
-                    else "language detector had no confident batch result"
-                )
-                if validation.suspicious_positions:
-                    detection_note += f"; suspicious line positions: {validation.suspicious_positions[:8]}"
-                log_event(
-                    "warn" if validation.failed else "info",
-                    f"Validation after attempt {attempt_index}: {detection_note}"
-                    + (f"; reason: {validation.reason}" if validation.reason else ""),
-                )
-            if not validation.failed:
-                if flagged_positions:
-                    strong_repair_positions = _strong_repair_positions(
-                        settings,
-                        batch_lines,
-                        translated_lines,
-                        validation,
-                        flagged_positions,
-                        merged_context,
-                    )
-                    if strong_repair_positions:
-                        if log_event and len(strong_repair_positions) != len(flagged_positions):
-                            skipped = [position + 1 for position in flagged_positions if position not in strong_repair_positions]
-                            log_event(
-                                "info",
-                                "Skipping automatic isolated retry for borderline suspect lines: "
-                                + ", ".join(str(item) for item in skipped[:8]),
-                            )
-                        repaired_lines, repair_stats = await self._repair_suspicious_lines(
-                            settings,
-                            batch_lines,
-                            translated_lines,
-                            merged_context,
-                            strong_repair_positions,
-                            reference_subtitles_by_position=reference_subtitles_by_position,
-                            batch_index=batch_index,
-                            log_event=log_event,
-                            should_stop=should_stop,
-                        )
-                        remaining_flagged = [position for position in flagged_positions if position not in strong_repair_positions]
-                        if remaining_flagged:
-                            notes = _validation_notes(validation, settings, remaining_flagged)
-                            repair_stats.suspicious_count += len(remaining_flagged)
-                            repair_stats.issues.extend(
-                                _build_validation_issues(
-                                    settings,
-                                    "suspect",
-                                    remaining_flagged,
-                                    batch_lines,
-                                    repaired_lines,
-                                    batch_index,
-                                    notes,
-                                    validation=validation,
-                                    session_context=merged_context,
-                                )
-                            )
-                        repair_stats.visual_doubts.extend(visual_doubts)
-                        return repaired_lines, merged_context, repair_stats
-                    notes = _validation_notes(validation, settings, flagged_positions)
-                    return translated_lines, merged_context, BatchProcessingStats(
-                        suspicious_count=len(flagged_positions),
-                        issues=_build_validation_issues(
-                            settings,
-                            "suspect",
-                            flagged_positions,
-                            batch_lines,
-                            translated_lines,
-                            batch_index,
-                            notes,
-                            validation=validation,
-                            session_context=merged_context,
-                        ),
-                        visual_doubts=visual_doubts,
-                    )
-                if attempt_index == 2 and first_failed_positions:
-                    notes = ["Validation cleared after retry with stricter instruction."]
-                    return translated_lines, merged_context, BatchProcessingStats(
-                        suspicious_count=len(first_failed_positions),
-                        fixed_count=len(first_failed_positions),
-                        retried_batches=1,
-                        issues=_build_validation_issues(
-                            settings,
-                            "auto_fixed",
-                            first_failed_positions,
-                            batch_lines,
-                            translated_lines,
-                            batch_index,
-                            notes,
-                            validation=validation,
-                            session_context=merged_context,
-                        ),
-                        visual_doubts=visual_doubts,
-                    )
-                return translated_lines, merged_context, BatchProcessingStats(visual_doubts=visual_doubts)
-            last_translated = translated_lines
-            last_context = merged_context
-            last_validation = validation
-            if attempt_index == 1:
-                first_failed_positions = flagged_positions
-
-        if len(batch_lines) > 1 and depth < 4:
-            _raise_if_stop_requested(should_stop)
-            return await self._split_batch_and_translate(
+        if log_event:
+            log_event("info", f"Submitting batch to model with {len(batch_lines)} lines")
+        try:
+            translated_lines, merged_context, visual_doubts = await self._translate_batch_once(
                 settings,
                 batch_lines,
                 session_context,
                 reference_subtitles_by_position=reference_subtitles_by_position,
                 visual_scene_contexts=visual_scene_contexts,
-                batch_index=batch_index,
+                allow_visual_doubts=bool(getattr(settings, "adaptive_vision", False)),
                 log_event=log_event,
-                depth=depth,
-                reason="Validation still failing",
-                should_stop=should_stop,
+            )
+        except ModelRequestTimeout as exc:
+            _raise_if_stop_requested(should_stop)
+            if len(batch_lines) > 1 and depth < 4:
+                return await self._split_batch_and_translate(
+                    settings,
+                    batch_lines,
+                    session_context,
+                    reference_subtitles_by_position=reference_subtitles_by_position,
+                    visual_scene_contexts=visual_scene_contexts,
+                    batch_index=batch_index,
+                    log_event=log_event,
+                    depth=depth,
+                    reason=_timeout_guidance(exc.seconds),
+                    should_stop=should_stop,
+                    partial_update=partial_update,
+                )
+            if log_event:
+                log_event("error", _timeout_guidance(exc.seconds))
+            raise
+        _raise_if_stop_requested(should_stop)
+
+        def validate(lines: list[SubtitleLine]) -> tuple[BatchValidationResult, list[int]]:
+            result = _validate_translated_batch(settings, batch_lines, lines, merged_context)
+            return result, _flagged_positions(result, batch_lines, settings)
+
+        def log_validation(label: str, validation: BatchValidationResult) -> None:
+            if not log_event:
+                return
+            detection_note = (
+                f"detected output language: {validation.detected_language}"
+                if validation.detected_language
+                else "language detector had no confident batch result"
+            )
+            if validation.suspicious_positions:
+                detection_note += f"; suspicious line positions: {validation.suspicious_positions[:8]}"
+            log_event(
+                "warn" if validation.failed else "info",
+                f"Validation {label}: {detection_note}"
+                + (f"; reason: {validation.reason}" if validation.reason else ""),
             )
 
-        if last_translated is not None:
-            flagged_positions = first_failed_positions or _flagged_positions(last_validation, batch_lines, settings)
-            notes = _validation_notes(last_validation, settings, flagged_positions)
-            if log_event:
-                log_event(
-                    "error",
-                    f"Validation did not clear after retries; using last model result. {last_validation.reason or 'No validator reason available.'}",
-                )
-            return last_translated, last_context, BatchProcessingStats(
-                suspicious_count=len(flagged_positions),
-                error_count=len(flagged_positions),
-                retried_batches=1,
-                issues=_build_validation_issues(
-                    settings,
-                    "error",
-                    flagged_positions,
-                    batch_lines,
-                    last_translated,
-                    batch_index,
-                    notes,
-                    validation=last_validation,
-                    session_context=last_context,
-                ),
+        validation, flagged_positions = validate(translated_lines)
+        log_validation("after initial translation", validation)
+        live_issues = _build_validation_issues(
+            settings,
+            "suspect",
+            flagged_positions,
+            batch_lines,
+            translated_lines,
+            batch_index,
+            ["Initial translation is visible while automatic recovery runs.", *_validation_notes(validation, settings, flagged_positions)],
+            validation=validation,
+            session_context=merged_context,
+        ) if flagged_positions else []
+        if partial_update:
+            partial_update(
+                translated_lines,
+                live_issues,
+                "checking translation" if flagged_positions else "translated",
+                flagged_positions,
             )
-        raise ValueError(f"Batch validation failed: {last_validation.reason or 'unknown validation failure'}")
+
+        if not validation.failed:
+            if not flagged_positions:
+                return translated_lines, merged_context, BatchProcessingStats(visual_doubts=visual_doubts)
+            strong_positions = _strong_repair_positions(
+                settings,
+                batch_lines,
+                translated_lines,
+                validation,
+                flagged_positions,
+                merged_context,
+            )[:MAX_ISOLATED_REPAIRS_PER_BATCH]
+            if not strong_positions:
+                return translated_lines, merged_context, BatchProcessingStats(
+                    suspicious_count=len(flagged_positions),
+                    issues=live_issues,
+                    visual_doubts=visual_doubts,
+                )
+            repaired_lines, repair_stats = await self._repair_suspicious_lines(
+                settings,
+                batch_lines,
+                translated_lines,
+                merged_context,
+                strong_positions,
+                reference_subtitles_by_position=reference_subtitles_by_position,
+                batch_index=batch_index,
+                log_event=log_event,
+                should_stop=should_stop,
+                partial_update=partial_update,
+            )
+            untouched_positions = [position for position in flagged_positions if position not in strong_positions]
+            if untouched_positions:
+                repair_stats.suspicious_count += len(untouched_positions)
+                repair_stats.issues.extend(
+                    _build_validation_issues(
+                        settings,
+                        "suspect",
+                        untouched_positions,
+                        batch_lines,
+                        repaired_lines,
+                        batch_index,
+                        _validation_notes(validation, settings, untouched_positions),
+                        validation=validation,
+                        session_context=merged_context,
+                    )
+                )
+            repair_stats.visual_doubts.extend(visual_doubts)
+            return repaired_lines, merged_context, repair_stats
+
+        recovery_positions = flagged_positions or [line.position for line in batch_lines]
+        recovery_lines = [line for line in batch_lines if line.position in set(recovery_positions)]
+        if log_event:
+            log_event(
+                "warn",
+                f"Retrying only {len(recovery_lines)} failed line(s); valid translations remain visible",
+            )
+        recovered_lines: list[SubtitleLine] = []
+        recovery_chunks = (
+            [recovery_lines[index:index + 4] for index in range(0, len(recovery_lines), 4)]
+            if validation.sequence_drift_positions
+            else [recovery_lines]
+        )
+        if validation.sequence_drift_positions and log_event:
+            log_event(
+                "warn",
+                "Neighboring-cue drift detected; retrying in anchored groups of at most four lines",
+            )
+        for recovery_chunk in recovery_chunks:
+            try:
+                chunk_lines_result, _, _ = await self._translate_batch_once(
+                    settings,
+                    recovery_chunk,
+                    merged_context,
+                    reference_subtitles_by_position=reference_subtitles_by_position,
+                    visual_scene_contexts=visual_scene_contexts,
+                    allow_visual_doubts=False,
+                    include_state_update=False,
+                    extra_instruction=strict_retry_instruction,
+                    log_event=log_event,
+                )
+                recovered_lines.extend(chunk_lines_result)
+            except ModelRequestTimeout as exc:
+                if log_event:
+                    log_event(
+                        "warn",
+                        _timeout_guidance(exc.seconds) + "; continuing with bounded line repair",
+                    )
+        _raise_if_stop_requested(should_stop)
+
+        translated_by_position = {line.position: line for line in translated_lines}
+        before_recovery = {
+            position: translated_by_position.get(position, SubtitleLine(position=position, text="")).text
+            for position in recovery_positions
+        }
+        for line in recovered_lines:
+            if line.text.strip():
+                translated_by_position[line.position] = line
+        merged_lines = [
+            translated_by_position.get(line.position, SubtitleLine(position=line.position, text=""))
+            for line in batch_lines
+        ]
+        recovery_validation, remaining_positions = validate(merged_lines)
+        log_validation("after targeted retry", recovery_validation)
+        if log_event and remaining_positions and all(
+            translated_by_position.get(position, SubtitleLine(position=position, text="")).text
+            == before_recovery.get(position, "")
+            for position in remaining_positions
+        ):
+            log_event("warn", "Targeted retry made no progress on the remaining failed lines; recursive splitting was skipped")
+
+        fixed_after_targeted = [position for position in recovery_positions if position not in remaining_positions]
+        targeted_live_issues = [
+            *_build_validation_issues(
+                settings,
+                "auto_fixed",
+                fixed_after_targeted,
+                batch_lines,
+                merged_lines,
+                batch_index,
+                ["Validation cleared after targeted retry."],
+                extra_codes=["retry_fixed"],
+                session_context=merged_context,
+            ),
+            *_build_validation_issues(
+                settings,
+                "suspect",
+                remaining_positions,
+                batch_lines,
+                merged_lines,
+                batch_index,
+                ["Targeted retry did not clear this line; bounded isolated repair may follow.", *_validation_notes(recovery_validation, settings, remaining_positions)],
+                validation=recovery_validation,
+                session_context=merged_context,
+            ),
+        ]
+        if partial_update:
+            partial_update(merged_lines, targeted_live_issues, "targeted retry", remaining_positions)
+
+        if remaining_positions:
+            repair_positions = remaining_positions[:MAX_ISOLATED_REPAIRS_PER_BATCH]
+            merged_lines, _ = await self._repair_suspicious_lines(
+                settings,
+                batch_lines,
+                merged_lines,
+                merged_context,
+                repair_positions,
+                reference_subtitles_by_position=reference_subtitles_by_position,
+                batch_index=batch_index,
+                log_event=log_event,
+                should_stop=should_stop,
+                partial_update=partial_update,
+            )
+
+        final_validation, final_failed_positions = validate(merged_lines)
+        fixed_positions = [position for position in recovery_positions if position not in final_failed_positions]
+        final_issues = [
+            *_build_validation_issues(
+                settings,
+                "auto_fixed",
+                fixed_positions,
+                batch_lines,
+                merged_lines,
+                batch_index,
+                ["Validation cleared during bounded recovery."],
+                extra_codes=["retry_fixed"],
+                session_context=merged_context,
+            ),
+            *_build_validation_issues(
+                settings,
+                "error",
+                final_failed_positions,
+                batch_lines,
+                merged_lines,
+                batch_index,
+                ["Automatic recovery stopped at the per-batch safety limit.", *_validation_notes(final_validation, settings, final_failed_positions)],
+                validation=final_validation,
+                session_context=merged_context,
+            ),
+        ]
+        if partial_update:
+            partial_update(merged_lines, final_issues, "recovery complete", [])
+        if final_failed_positions and log_event:
+            log_event(
+                "error",
+                f"Bounded recovery stopped with {len(final_failed_positions)} unresolved line(s): {final_failed_positions[:12]}",
+            )
+        return merged_lines, merged_context, BatchProcessingStats(
+            suspicious_count=len(recovery_positions),
+            fixed_count=len(fixed_positions),
+            error_count=len(final_failed_positions),
+            retried_batches=1 + (1 if remaining_positions else 0),
+            issues=final_issues,
+            visual_doubts=visual_doubts,
+        )
 
     async def translate_batch(
         self,
@@ -2843,6 +3236,7 @@ class OpenAICompatibleTranslator:
         batch_index: int | None = None,
         log_event: LogEvent | None = None,
         should_stop: StopCheck | None = None,
+        partial_update: PartialBatchUpdate | None = None,
     ) -> tuple[list[SubtitleLine], SessionContext | None, BatchProcessingStats]:
         return await self._translate_batch_with_validation(
             settings,
@@ -2853,4 +3247,5 @@ class OpenAICompatibleTranslator:
             batch_index=batch_index,
             log_event=log_event,
             should_stop=should_stop,
+            partial_update=partial_update,
         )
