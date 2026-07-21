@@ -100,7 +100,7 @@ let reusableVideoSource = null;
 let reusableVisualContextSource = null;
 let reusableVisualContextVideoChanged = false;
 const expandedContextHistory = new Set();
-const expandedJobAuxiliary = new Set();
+const collapsedJobAuxiliary = new Set();
 const expandedActiveContext = new Set();
 const expandedJobMoreActions = new Set();
 const renderedContextSnapshots = new Map();
@@ -2289,11 +2289,11 @@ function renderContext(job) {
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
         <a class="link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
+        <button class="ghost" data-action="logs" data-id="${job.id}">View Log</button>
         <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
           <summary>More</summary>
           <div>
             <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all">Review Lines</button>
-            <button class="ghost" data-action="logs" data-id="${job.id}">View Log</button>
             <button class="ghost" data-action="edit" data-id="${job.id}" ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Edit Context</button>
             <button class="danger ghost" data-action="stop" data-id="${job.id}" ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop Job</button>
           </div>
@@ -2486,13 +2486,13 @@ function renderJobs(jobs) {
           ${canResume ? `<button data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}">${escapeHtml(resumeLabel)}</button>` : ""}
           <a class="ghost link-button" href="/review/${job.id}">Open Workspace</a>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}">Download</button>` : ""}
+          <button class="ghost job-log-button" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">Log</button>
           <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
             <summary>More</summary>
             <div>
               <button class="ghost" data-action="reload-job" data-id="${job.id}" title="${escapeHtml(reloadTitle)}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
               <button class="ghost" data-action="edit" data-id="${job.id}" title="${escapeHtml(editContextTitle)}" ${!canEditContext ? "disabled" : ""}>Edit Context</button>
               <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
-              <button class="ghost" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">View Log</button>
               <button class="danger ghost" data-action="delete-job" data-id="${job.id}" ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete Job</button>
             </div>
           </details>
@@ -2511,11 +2511,11 @@ function renderJobs(jobs) {
         <button type="button" class="is-error" data-action="review-lines" data-id="${job.id}" data-filter="error" title="Open subtitle lines with unresolved errors"><small>Errors</small><strong>${escapeHtml(String(validation.error_subtitles || 0))}</strong></button>
       </div>
       ${(referenceTracks.length || visionEnabled) ? `
-        <details class="job-auxiliary-details" data-job-auxiliary="${escapeHtml(job.id)}" ${expandedJobAuxiliary.has(job.id) ? "open" : ""}>
+        <details class="job-auxiliary-details" data-job-auxiliary="${escapeHtml(job.id)}" ${collapsedJobAuxiliary.has(job.id) ? "" : "open"}>
           <summary>Context &amp; evidence <span>${referenceTracks.length ? `${escapeHtml(String(referenceTracks.length))} ref` : ""}${referenceTracks.length && visionEnabled ? " · " : ""}${visionEnabled ? "vision enabled" : ""}</span></summary>
           <div>
             ${referenceTracks.length ? `<div class="reference-track-summary-list">${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}</div>` : ""}
-            ${renderVisionTimeline(job, true, "job")}
+            ${renderVisionTimeline(job, false, "job")}
           </div>
         </details>
       ` : ""}
@@ -3719,7 +3719,7 @@ document.addEventListener("click", (event) => {
     }
   }
   const workspaceCard = event.target.closest(".job-workspace-link[data-workspace-url]");
-  if (workspaceCard && !event.target.closest("button, a, input, textarea, select, summary, label")) {
+  if (workspaceCard && !event.target.closest("button, a, input, textarea, select, summary, label, .job-auxiliary-details")) {
     const selection = window.getSelection();
     const hasTextSelection = selection
       && String(selection.toString() || "").trim().length > 0
@@ -4049,8 +4049,8 @@ document.addEventListener("toggle", (event) => {
   if (!(target instanceof HTMLDetailsElement)) return;
   const auxiliaryJobId = target.dataset.jobAuxiliary;
   if (auxiliaryJobId) {
-    if (target.open) expandedJobAuxiliary.add(auxiliaryJobId);
-    else expandedJobAuxiliary.delete(auxiliaryJobId);
+    if (target.open) collapsedJobAuxiliary.delete(auxiliaryJobId);
+    else collapsedJobAuxiliary.add(auxiliaryJobId);
   }
   const activeContextJobId = target.dataset.activeContext;
   if (activeContextJobId) {
