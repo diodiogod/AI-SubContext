@@ -1709,6 +1709,11 @@ snapshotDialog.addEventListener("close", () => {
   openBatchIndex = null;
   saveReviewUiState();
 });
+snapshotDialog.addEventListener("click", (event) => {
+  if (event.target === snapshotDialog && snapshotDialog.open) {
+    snapshotDialog.close();
+  }
+});
 document.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
 window.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
 window.addEventListener("pagehide", saveReviewScrollState, { passive: true });

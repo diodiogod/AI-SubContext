@@ -110,6 +110,8 @@ const modelCallAnimation = { jobId: null, rafId: null };
 const logDialogTabs = new Map();
 const logDialogReadingState = new Map();
 const visionRailScrollState = new Map();
+const visionRailNavigationState = new WeakMap();
+const visionRailWheelState = new WeakMap();
 const seenVisionFrameIds = new Set();
 const VIDEO_FILE_EXTENSIONS = new Set(["mp4", "mkv", "webm", "mov", "avi", "m4v", "ts"]);
 const jobsById = new Map();
@@ -361,8 +363,28 @@ function updateVisionRailFocus(rail) {
     const distance = Math.abs(frameCenter - focusCenter);
     const focus = Math.max(0, 1 - (distance / focusRange));
     const opacity = 0.52 + (0.48 * focus);
+    const scale = 0.84 + (0.16 * focus);
     frame.style.setProperty("--frame-opacity", opacity.toFixed(2));
+    frame.style.setProperty("--frame-scale", scale.toFixed(3));
   }
+}
+
+function scrollVisionRail(rail, direction) {
+  if (!rail || !direction) return;
+  const now = performance.now();
+  const previous = visionRailNavigationState.get(rail) || { direction: 0, streak: 0, at: 0 };
+  const continues = previous.direction === direction && now - previous.at < 850;
+  const streak = continues ? Math.min(previous.streak + 1, 15) : 1;
+  visionRailNavigationState.set(rail, { direction, streak, at: now });
+  const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+  const baseDistance = Math.max(280, rail.clientWidth * 0.52);
+  const acceleration = 1 + (Math.log2(streak + 1) * 0.9);
+  const target = Math.max(0, Math.min(maxScroll, rail.scrollLeft + (direction * baseDistance * acceleration)));
+  rail.scrollTo({ left: target, behavior: "smooth" });
+  window.setTimeout(() => {
+    rememberVisionRailScroll(rail);
+    scheduleVisionRailFocus(rail);
+  }, 220);
 }
 
 function scheduleVisionRailFocus(rail) {
@@ -439,8 +461,8 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
           <span title="Revised: subtitle lines whose provisional translation was changed after the model inspected the requested screenshots.">Revised ${escapeHtml(String(stats.lines_revised || 0))}</span>
           ${stats.clarification_failures ? `<span class="failed">Failed ${escapeHtml(String(stats.clarification_failures))}</span>` : ""}
           ${frames.length > visible.length ? `<span class="vision-more">+${escapeHtml(String(frames.length - visible.length))} earlier</span>` : ""}
-          <button type="button" class="vision-rail-control" data-vision-scroll="-1" title="Scroll visual evidence backward" aria-label="Previous screenshots">‹</button>
-          <button type="button" class="vision-rail-control" data-vision-scroll="1" title="Scroll visual evidence forward" aria-label="Next screenshots">›</button>
+          <button type="button" class="vision-rail-control" data-vision-scroll="-1" title="Previous evidence · repeated clicks accelerate" aria-label="Previous screenshots">‹</button>
+          <button type="button" class="vision-rail-control" data-vision-scroll="1" title="Next evidence · repeated clicks accelerate" aria-label="Next screenshots">›</button>
         </div>
       </div>
       <div class="vision-rail" data-vision-rail-key="${escapeHtml(`${job.id}:${location}`)}" data-vision-live="${isLive ? "true" : "false"}">
@@ -2266,6 +2288,9 @@ function renderContext(job) {
     : "Resume a paused job from the next pending batch using current Prompt Lab runtime settings.";
   return `
     <div class="context-card">
+      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">
+        <span class="job-corner-label" aria-hidden="true">log</span>
+      </button>
       <div class="panel-head">
         <div>
           <h2>Translation Context</h2>
@@ -2289,7 +2314,6 @@ function renderContext(job) {
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
         <a class="link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
-        <button class="ghost" data-action="logs" data-id="${job.id}">View Log</button>
         <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
           <summary>More</summary>
           <div>
@@ -2464,6 +2488,9 @@ function renderJobs(jobs) {
           : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
+      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
+        <span class="job-corner-label" aria-hidden="true">log</span>
+      </button>
       <div class="job-top">
         <div class="job-copy">
           <div class="job-headline">
@@ -2486,7 +2513,6 @@ function renderJobs(jobs) {
           ${canResume ? `<button data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}">${escapeHtml(resumeLabel)}</button>` : ""}
           <a class="ghost link-button" href="/review/${job.id}">Open Workspace</a>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}">Download</button>` : ""}
-          <button class="ghost job-log-button" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">Log</button>
           <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
             <summary>More</summary>
             <div>
@@ -3746,12 +3772,7 @@ document.addEventListener("click", (event) => {
     const rail = visionScroll.closest(".vision-timeline")?.querySelector(".vision-rail");
     if (!rail) return;
     const direction = Number(visionScroll.dataset.visionScroll || 0);
-    rail.scrollBy({
-      left: direction * Math.max(220, rail.clientWidth * 0.72),
-      behavior: "smooth",
-    });
-    rememberVisionRailScroll(rail);
-    window.setTimeout(() => scheduleVisionRailFocus(rail), 180);
+    scrollVisionRail(rail, direction);
     return;
   }
   const referenceRemove = event.target.closest("[data-reference-remove]");
@@ -3963,7 +3984,16 @@ document.addEventListener("wheel", (event) => {
   const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
   if (!horizontalDelta) return;
   event.preventDefault();
-  rail.scrollLeft += horizontalDelta;
+  const now = performance.now();
+  const direction = Math.sign(horizontalDelta);
+  const previous = visionRailWheelState.get(rail) || { direction: 0, streak: 0, at: 0 };
+  const rapidRepeat = previous.direction === direction && now - previous.at < 180;
+  const streak = rapidRepeat ? Math.min(previous.streak + 1, 18) : 1;
+  visionRailWheelState.set(rail, { direction, streak, at: now });
+  const magnitude = Math.abs(horizontalDelta);
+  const burstAcceleration = rapidRepeat ? Math.log2(streak + 1) * 0.72 : 0;
+  const gestureAcceleration = magnitude > 80 ? Math.log2(1 + (magnitude / 80)) * 0.65 : 0;
+  rail.scrollLeft += horizontalDelta * (1 + burstAcceleration + gestureAcceleration);
   rememberVisionRailScroll(rail);
   scheduleVisionRailFocus(rail);
 }, { passive: false });
@@ -3983,6 +4013,13 @@ dialog?.addEventListener("close", () => {
   editingJobId = null;
   scheduleConsoleUiSave();
 });
+for (const dismissibleDialog of [dialog, detailDialog, visionEvidenceDialog, logDialog, reviewDialog, snapshotDialog]) {
+  dismissibleDialog?.addEventListener("click", (event) => {
+    if (event.target === dismissibleDialog && dismissibleDialog.open) {
+      dismissibleDialog.close();
+    }
+  });
+}
 fileInput.addEventListener("change", acceptSelectedSourceFile);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
 videoFileInput?.addEventListener("change", acceptSelectedVideo);
