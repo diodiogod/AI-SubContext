@@ -10,22 +10,16 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-1" />
+    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-2" />
   </head>
   <body class="console-page">
     <main class="shell console-shell">
       <section class="hero hero-grid">
         <div class="hero-copy">
-          <div class="console-brand-row">
-            <p class="eyebrow">AI SubContext</p>
-            <nav class="console-nav" aria-label="Application tools">
-              <a href="#jobs-panel">Jobs</a>
-              <a href="/prompt-lab">Prompt Lab</a>
-            </nav>
-          </div>
-          <h1>Translate with context.<br /><span>Review with confidence.</span></h1>
+          <p class="eyebrow">AI SubContext</p>
+          <h1>Focused subtitle translation with live context control.</h1>
           <p class="lede">
-            A focused workspace for preparing subtitles, controlling model context, and resolving only the lines that need attention.
+            Drop an <code>.srt</code>, pick languages and model, watch the context card update, and intervene when needed.
           </p>
         </div>
       </section>
@@ -215,6 +209,7 @@
           <div class="form-section controls-section">
             <div class="section-head">
               <div><div class="mini-eyebrow">Context strategy</div><h3>Choose how much context the model can use</h3></div>
+              <a class="ghost link-button panel-link-button" href="/prompt-lab">Prompt Lab</a>
             </div>
             <label
               class="checkbox checkbox-card structured-context-toggle"
@@ -222,25 +217,31 @@
             >
               <input type="checkbox" id="structured_context" checked />
               <span>
-                <strong>Structured context</strong>
-                <small>Carry scene, glossary, and character state across batches.</small>
+                <strong>Use structured context</strong>
+                <small>Keep a rolling card with scene context, recurring characters, glossary terms, and ambiguities so wording stays consistent across batches.</small>
               </span>
             </label>
             <section class="vision-mode-section">
               <div class="vision-mode-heading">
                 <div>
                   <div class="mini-eyebrow">Visual understanding</div>
-                  <p>Enable only the visual assistance useful for this run.</p>
+                  <p>Choose either approach independently, or combine them when both kinds of visual evidence are useful.</p>
                 </div>
               </div>
               <div class="vision-mode-grid">
                 <label class="checkbox checkbox-card vision-toggle" title="Build timestamped visual scene guides before translation.">
                   <input type="checkbox" id="visual_scene_context" />
-                  <span><strong>Scene guides</strong><small>Study ordered frames before translating each scene.</small></span>
+                  <span>
+                    <strong>Prepare visual scene guides</strong>
+                    <small>Study ordered frames before translation, remember the previous visual scene, and give each batch a concise guide for its current scene.</small>
+                  </span>
                 </label>
                 <label class="checkbox checkbox-card vision-toggle" title="Inspect frames only when visible evidence can resolve a translation doubt.">
                   <input type="checkbox" id="adaptive_vision" />
-                  <span><strong>Doubt resolution</strong><small>Inspect a short frame sequence only when needed.</small></span>
+                  <span>
+                    <strong>Resolve meaningful translation doubts</strong>
+                    <small>Ask for a short frame sequence only when the translator supplies two different translations that visible evidence can choose between.</small>
+                  </span>
                 </label>
               </div>
             </section>
@@ -454,6 +455,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260720-overhaul-1"></script>
+    <script src="/static/app.js?v=20260720-overhaul-2"></script>
   </body>
 </html>

@@ -100,6 +100,9 @@ let reusableVideoSource = null;
 let reusableVisualContextSource = null;
 let reusableVisualContextVideoChanged = false;
 const expandedContextHistory = new Set();
+const expandedJobAuxiliary = new Set();
+const expandedActiveContext = new Set();
+const expandedJobMoreActions = new Set();
 const renderedContextSnapshots = new Map();
 const modelCallParserState = new Map();
 const modelCallRenderedState = new Map();
@@ -130,6 +133,27 @@ function readModelCallStats() {
 }
 
 let modelCallStats = readModelCallStats();
+
+function organizeConsoleWorkflowLayout() {
+  if (!form || form.classList.contains("workflow-columns-ready")) return;
+  const sourceSection = form.querySelector(".source-section");
+  const translationSection = form.querySelector(".translation-section");
+  const workspace = form.querySelector(".workspace-grid");
+  const modelSection = workspace?.querySelector(".model-section");
+  const controlsSection = workspace?.querySelector(".controls-section");
+  if (!sourceSection || !translationSection || !workspace || !modelSection || !controlsSection) return;
+
+  const sourceColumn = document.createElement("div");
+  sourceColumn.className = "workflow-column workflow-column-source";
+  const translationColumn = document.createElement("div");
+  translationColumn.className = "workflow-column workflow-column-translation";
+  form.insertBefore(sourceColumn, sourceSection);
+  form.insertBefore(translationColumn, sourceSection);
+  sourceColumn.append(sourceSection, modelSection);
+  translationColumn.append(translationSection, controlsSection);
+  workspace.remove();
+  form.classList.add("workflow-columns-ready");
+}
 
 function writeModelCallStats() {
   localStorage.setItem(MODEL_CALL_STATS_KEY, JSON.stringify(modelCallStats));
@@ -2265,7 +2289,7 @@ function renderContext(job) {
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
         <a class="link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
-        <details class="job-more-actions">
+        <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
           <summary>More</summary>
           <div>
             <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all">Review Lines</button>
@@ -2309,7 +2333,7 @@ function renderContext(job) {
         )}
       </div>
       ${renderVisionTimeline(job, true, "active")}
-      <details class="active-context-details">
+      <details class="active-context-details" data-active-context="${escapeHtml(job.id)}" ${expandedActiveContext.has(job.id) ? "open" : ""}>
         <summary>
           <div>
             <strong>Full context card</strong>
@@ -2462,7 +2486,7 @@ function renderJobs(jobs) {
           ${canResume ? `<button data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}">${escapeHtml(resumeLabel)}</button>` : ""}
           <a class="ghost link-button" href="/review/${job.id}">Open Workspace</a>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}">Download</button>` : ""}
-          <details class="job-more-actions">
+          <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
             <summary>More</summary>
             <div>
               <button class="ghost" data-action="reload-job" data-id="${job.id}" title="${escapeHtml(reloadTitle)}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
@@ -2481,13 +2505,13 @@ function renderJobs(jobs) {
       ${renderEtaPill(job)}
       <div class="progress"><div class="progress-bar" style="width:${job.progress || 0}%"></div></div>
       <div class="job-health" aria-label="Job validation summary">
-        <span><small>Lines</small><strong>${escapeHtml(String(sourceCount || 0))}</strong></span>
-        <span class="is-suspect"><small>Suspect</small><strong>${escapeHtml(String(validation.suspicious_subtitles || 0))}</strong></span>
-        <span class="is-fixed"><small>Fixed</small><strong>${escapeHtml(String(fixedTotal))}</strong></span>
-        <span class="is-error"><small>Errors</small><strong>${escapeHtml(String(validation.error_subtitles || 0))}</strong></span>
+        <button type="button" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Open all subtitle lines"><small>Lines</small><strong>${escapeHtml(String(sourceCount || 0))}</strong></button>
+        <button type="button" class="is-suspect" data-action="review-lines" data-id="${job.id}" data-filter="suspect" title="Open suspected subtitle lines"><small>Suspect</small><strong>${escapeHtml(String(validation.suspicious_subtitles || 0))}</strong></button>
+        <button type="button" class="is-fixed" data-action="review-lines" data-id="${job.id}" data-filter="fixed" title="Open automatically and manually fixed lines"><small>Fixed</small><strong>${escapeHtml(String(fixedTotal))}</strong></button>
+        <button type="button" class="is-error" data-action="review-lines" data-id="${job.id}" data-filter="error" title="Open subtitle lines with unresolved errors"><small>Errors</small><strong>${escapeHtml(String(validation.error_subtitles || 0))}</strong></button>
       </div>
       ${(referenceTracks.length || visionEnabled) ? `
-        <details class="job-auxiliary-details">
+        <details class="job-auxiliary-details" data-job-auxiliary="${escapeHtml(job.id)}" ${expandedJobAuxiliary.has(job.id) ? "open" : ""}>
           <summary>Context &amp; evidence <span>${referenceTracks.length ? `${escapeHtml(String(referenceTracks.length))} ref` : ""}${referenceTracks.length && visionEnabled ? " · " : ""}${visionEnabled ? "vision enabled" : ""}</span></summary>
           <div>
             ${referenceTracks.length ? `<div class="reference-track-summary-list">${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}</div>` : ""}
@@ -4020,8 +4044,28 @@ document.addEventListener("change", (event) => {
     scheduleConsoleUiSave();
   }
 }, true);
+document.addEventListener("toggle", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLDetailsElement)) return;
+  const auxiliaryJobId = target.dataset.jobAuxiliary;
+  if (auxiliaryJobId) {
+    if (target.open) expandedJobAuxiliary.add(auxiliaryJobId);
+    else expandedJobAuxiliary.delete(auxiliaryJobId);
+  }
+  const activeContextJobId = target.dataset.activeContext;
+  if (activeContextJobId) {
+    if (target.open) expandedActiveContext.add(activeContextJobId);
+    else expandedActiveContext.delete(activeContextJobId);
+  }
+  const moreJobId = target.dataset.jobMore;
+  if (moreJobId) {
+    if (target.open) expandedJobMoreActions.add(moreJobId);
+    else expandedJobMoreActions.delete(moreJobId);
+  }
+}, true);
 
 async function initializeApp() {
+  organizeConsoleWorkflowLayout();
   await fetchRuntimeDefaults();
   loadSettings();
   applyRuntimeDefaults();
