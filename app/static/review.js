@@ -1082,10 +1082,7 @@ function renderSide(job) {
     <div class="review-actions review-decision-bar">
       <button type="button" id="workspace-save" data-mode="${escapeHtml(action.mode)}">${escapeHtml(action.label)}</button>
       <button type="button" class="ghost" id="workspace-batch-card">Batch Card</button>
-      <details class="review-more-actions">
-        <summary title="More actions" aria-label="More actions">•••</summary>
-        <div><button type="button" class="danger ghost" id="workspace-remove">Remove Subtitle</button></div>
-      </details>
+      <button type="button" class="danger ghost" id="workspace-remove">Remove Subtitle</button>
     </div>
   `;
 }
