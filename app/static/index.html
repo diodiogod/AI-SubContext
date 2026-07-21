@@ -10,16 +10,22 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260628-2" />
+    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-1" />
   </head>
-  <body>
-    <main class="shell">
+  <body class="console-page">
+    <main class="shell console-shell">
       <section class="hero hero-grid">
         <div class="hero-copy">
-          <p class="eyebrow">AI SubContext</p>
-          <h1>Focused subtitle translation with live context control.</h1>
+          <div class="console-brand-row">
+            <p class="eyebrow">AI SubContext</p>
+            <nav class="console-nav" aria-label="Application tools">
+              <a href="#jobs-panel">Jobs</a>
+              <a href="/prompt-lab">Prompt Lab</a>
+            </nav>
+          </div>
+          <h1>Translate with context.<br /><span>Review with confidence.</span></h1>
           <p class="lede">
-            Drop an <code>.srt</code>, pick languages and model, watch the context card update, and intervene when needed.
+            A focused workspace for preparing subtitles, controlling model context, and resolving only the lines that need attention.
           </p>
         </div>
       </section>
@@ -27,13 +33,21 @@
       <section class="panel panel-form">
         <div class="panel-banner">
           <div>
-            <div class="mini-eyebrow">Translation Console</div>
-            <h2>Prepare the file, model, and runtime controls.</h2>
+            <div class="mini-eyebrow">New translation</div>
+            <h2>Set up one clean translation run.</h2>
+          </div>
+          <div class="workflow-steps" aria-label="Translation setup steps">
+            <span><b>1</b> Source</span>
+            <span><b>2</b> Language</span>
+            <span><b>3</b> Model &amp; context</span>
           </div>
         </div>
         <form id="job-form" class="form-layout">
-          <div class="file-field form-section">
-            <div class="mini-eyebrow">Subtitle File</div>
+          <div class="file-field form-section source-section">
+            <div class="section-title-row">
+              <span class="section-number">1</span>
+              <div><div class="mini-eyebrow">Source</div><h3>Choose the subtitle to work on</h3></div>
+            </div>
             <label id="drop-zone" class="drop-zone" for="file">
               <input type="file" id="file" accept=".srt" required hidden />
               <div class="drop-title">Drop an <code>.srt</code> here</div>
@@ -50,7 +64,8 @@
               <span class="secondary-file-label">Translated File for Review</span>
               <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
             </label>
-            <section class="video-source-card">
+            <details class="optional-source-card video-source-card">
+              <summary><span>Video context</span><small>Optional · enables visual scene understanding</small></summary>
               <div class="video-source-head">
                 <div>
                   <div class="secondary-file-label">Source Video for Vision</div>
@@ -89,8 +104,9 @@
                 <span class="secondary-file-label">Upload a Copy Instead</span>
                 <span id="selected-video-file" class="secondary-file-value">Fallback for remote setups; this duplicates the video.</span>
               </label>
-            </section>
-            <section class="reference-tracks-card">
+            </details>
+            <details class="optional-source-card reference-tracks-card">
+              <summary><span>Reference subtitle tracks</span><small>Optional · add another language as supporting context</small></summary>
               <div class="reference-tracks-head">
                 <div>
                   <div class="secondary-file-label">
@@ -107,11 +123,14 @@
                 <button type="button" id="add-reference-track-btn" class="ghost small">Add</button>
               </div>
               <div id="reference-tracks" class="reference-track-list"></div>
-            </section>
+            </details>
           </div>
 
-          <div class="form-section">
-            <div class="mini-eyebrow">Translation Setup</div>
+          <div class="form-section translation-section">
+            <div class="section-title-row">
+              <span class="section-number">2</span>
+              <div><div class="mini-eyebrow">Language</div><h3>Define the translation direction</h3></div>
+            </div>
             <div class="field-grid field-grid-primary">
               <label class="field-span-2">
                 <span class="label-row">Title <span class="info-dot" title="Optional movie or episode title. Helps the model infer stable context like setting, genre, and recurring names.">?</span></span>
@@ -146,16 +165,25 @@
                   <div class="tips-history-menu" data-tips-history-menu="setup"></div>
                 </div>
               </label>
-              <label class="field-span-full">
-                <span class="label-row">Base URL <span class="info-dot" title="OpenAI-compatible API endpoint, local or remote. Local models give more control; remote endpoints may be stronger but depend on network and provider limits.">?</span></span>
-                <input type="text" id="base_url" value="http://127.0.0.1:1234/v1" required />
-              </label>
             </div>
           </div>
 
           <div class="workspace-grid">
             <div class="form-section model-section">
-              <div class="mini-eyebrow">Model Selection</div>
+              <div class="section-title-row">
+                <span class="section-number">3</span>
+                <div><div class="mini-eyebrow">Model</div><h3>Connect the translation engine</h3></div>
+              </div>
+              <div class="field-grid connection-fields">
+                <label>
+                  <span class="label-row">Base URL <span class="info-dot" title="OpenAI-compatible API endpoint, local or remote.">?</span></span>
+                  <input type="text" id="base_url" value="http://127.0.0.1:1234/v1" required />
+                </label>
+                <label>
+                  <span class="label-row">API Key <span class="info-dot" title="Local tools like LM Studio often accept any placeholder; remote APIs require a real key.">?</span></span>
+                  <input type="text" id="api_key" value="lm-studio" />
+                </label>
+              </div>
               <label class="model-field">
                 <span class="label-row">Model <span class="info-dot" title="Model used for translation and context updates. Stronger models usually give fewer untranslated lines; weaker local models may need smaller batches and more retries.">?</span></span>
                 <input type="text" id="model" list="model-history" value="google/gemma-4-e4b" required />
@@ -178,18 +206,48 @@
                   <div id="model-list-status" class="job-meta model-status"></div>
                 </div>
               </label>
+              <div class="connection-action-row">
+                <div id="connection-test-result" class="job-meta connection-result"></div>
+                <button type="button" id="test-connection-btn" class="ghost">Test Connection</button>
+              </div>
             </div>
 
           <div class="form-section controls-section">
             <div class="section-head">
-              <div class="mini-eyebrow">Runtime Controls</div>
-              <a class="ghost link-button panel-link-button" href="/prompt-lab">Prompt Lab</a>
+              <div><div class="mini-eyebrow">Context strategy</div><h3>Choose how much context the model can use</h3></div>
             </div>
-            <div class="field-grid field-grid-controls">
-              <label class="field-span-full">
-                <span class="label-row">API Key <span class="info-dot" title="Auth token for the endpoint. Local tools like LM Studio often accept any placeholder; remote APIs usually require a real key.">?</span></span>
-                <input type="text" id="api_key" value="lm-studio" />
-              </label>
+            <label
+              class="checkbox checkbox-card structured-context-toggle"
+              title="Keeps a rolling card with scene context, characters, glossary, and ambiguities."
+            >
+              <input type="checkbox" id="structured_context" checked />
+              <span>
+                <strong>Structured context</strong>
+                <small>Carry scene, glossary, and character state across batches.</small>
+              </span>
+            </label>
+            <section class="vision-mode-section">
+              <div class="vision-mode-heading">
+                <div>
+                  <div class="mini-eyebrow">Visual understanding</div>
+                  <p>Enable only the visual assistance useful for this run.</p>
+                </div>
+              </div>
+              <div class="vision-mode-grid">
+                <label class="checkbox checkbox-card vision-toggle" title="Build timestamped visual scene guides before translation.">
+                  <input type="checkbox" id="visual_scene_context" />
+                  <span><strong>Scene guides</strong><small>Study ordered frames before translating each scene.</small></span>
+                </label>
+                <label class="checkbox checkbox-card vision-toggle" title="Inspect frames only when visible evidence can resolve a translation doubt.">
+                  <input type="checkbox" id="adaptive_vision" />
+                  <span><strong>Doubt resolution</strong><small>Inspect a short frame sequence only when needed.</small></span>
+                </label>
+              </div>
+            </section>
+            <details class="advanced-settings">
+              <summary><span>Advanced runtime settings</span><small>Batching, randomness, initial context card, and visual sampling</small></summary>
+              <div class="advanced-settings-body">
+                <div class="field-grid field-grid-controls">
               <label>
                 <span class="label-row">Batch Size <span class="info-dot" title="How many subtitle lines are sent in one request. Higher is faster and gives more local context, but increases failure risk on weak models. Lower is slower but safer.">?</span></span>
                 <input type="number" id="batch_size" min="1" max="100" value="10" />
@@ -210,48 +268,8 @@
                 <span class="label-row">Initial Card Max Chars <span class="info-dot" title="Character budget used by Auto and Distributed sample modes when creating the first movie card. Higher gives more evidence, but weak local models may struggle. Whole subtitle mode ignores this cap and sends all cleaned subtitle text.">?</span></span>
                 <input type="number" id="initial_card_max_chars" min="2000" max="200000" step="1000" value="24000" />
               </label>
-            </div>
-            <div id="initial-card-estimate" class="job-meta"></div>
-            <label
-              class="checkbox checkbox-card"
-              title="Keeps a rolling card with scene context, characters, glossary, and ambiguities. Better consistency, but weak models may sometimes update it badly."
-            >
-              <input type="checkbox" id="structured_context" checked />
-              <span>
-                <strong>Use structured context</strong>
-                <small>Carry scene, glossary, and character state across batches.</small>
-              </span>
-            </label>
-            <section class="vision-mode-section">
-              <div class="vision-mode-heading">
-                <div>
-                  <div class="mini-eyebrow">Visual Understanding</div>
-                  <p>Choose either approach independently, or combine them for an exploratory run.</p>
                 </div>
-              </div>
-              <div class="vision-mode-grid">
-                <label
-                  class="checkbox checkbox-card vision-toggle"
-                  title="Builds timestamped visual scene guides before translation and reuses them as factual context."
-                >
-                  <input type="checkbox" id="visual_scene_context" />
-                  <span>
-                    <strong>Prepare visual scene guides</strong>
-                    <small>Study ordered frames before translation, remember the previous visual scene, and give each batch a concise guide for its current scene.</small>
-                  </span>
-                </label>
-                <label
-                  class="checkbox checkbox-card vision-toggle"
-                  title="Allows a follow-up only when the translator supplies two different translations that visible evidence can choose between."
-                >
-                  <input type="checkbox" id="adaptive_vision" />
-                  <span>
-                    <strong>Resolve meaningful translation doubts</strong>
-                    <small>Ask for a short frame sequence only when vision can choose between the current translation and a concrete alternative.</small>
-                  </span>
-                </label>
-              </div>
-            </section>
+                <div id="initial-card-estimate" class="job-meta"></div>
             <div id="vision-controls" class="vision-controls" hidden>
               <div id="scene-vision-controls" class="vision-control-group" hidden>
                 <div class="mini-eyebrow">Scene Guide Preparation</div>
@@ -310,13 +328,14 @@
               <div id="vision-readiness" class="job-meta vision-readiness"></div>
             </div>
             <div class="job-meta prompt-lab-summary">
-              Prompt overrides, max output tokens, and request timeout now live in the dedicated Prompt Lab page.
+              Prompt overrides, token limits, and timeouts live in <a href="/prompt-lab">Prompt Lab</a>.
             </div>
-            <div id="connection-test-result" class="job-meta connection-result"></div>
+              </div>
+            </details>
             <div id="form-reload-status" class="form-reload-status" hidden></div>
-            <div class="actions action-stack">
+            <div class="launch-actions">
               <button type="submit" title="Start a translation job using the current file, model, and runtime settings.">
-                Translate Subtitle
+                <span>Start Translation</span><small>Create a new job with these settings</small>
               </button>
               <button
                 type="button"
@@ -324,15 +343,7 @@
                 class="ghost"
                 title="Run the validator on a source subtitle plus an already translated subtitle. Useful for checking leftover source-language lines and fixing them manually."
               >
-                Validate Existing Translation
-              </button>
-              <button
-                type="button"
-                id="test-connection-btn"
-                class="ghost"
-                title="Check whether the endpoint is reachable and whether the selected model appears available."
-              >
-                Test Connection
+                Review Existing Translation
               </button>
             </div>
           </div>
@@ -341,7 +352,7 @@
       </section>
 
       <section id="active-job-card" class="panel hidden"></section>
-      <section class="panel panel-jobs">
+      <section id="jobs-panel" class="panel panel-jobs">
         <div class="panel-head">
           <h2>Jobs</h2>
           <div class="actions">
@@ -443,6 +454,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260629-1"></script>
+    <script src="/static/app.js?v=20260720-overhaul-1"></script>
   </body>
 </html>

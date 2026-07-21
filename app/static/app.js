@@ -2242,9 +2242,6 @@ function renderContext(job) {
     : "Resume a paused job from the next pending batch using current Prompt Lab runtime settings.";
   return `
     <div class="context-card">
-      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">
-        <span class="job-corner-label" aria-hidden="true">log</span>
-      </button>
       <div class="panel-head">
         <div>
           <h2>Translation Context</h2>
@@ -2264,14 +2261,19 @@ function renderContext(job) {
         </div>
       ` : ""}
       ${renderRuntimeActivity(job)}
-      <div class="actions">
+      <div class="active-job-actions">
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
-        <a class="ghost link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
-        <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Open the line review panel. Use it to inspect flagged lines and apply manual fixes.">Review Lines</button>
-        <button class="ghost" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">View Log</button>
-        <button class="ghost" data-action="edit" data-id="${job.id}" title="Edit the rolling context card before the next batch uses it." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Edit Context</button>
-        <button class="danger" data-action="stop" data-id="${job.id}" title="Cancel the active app request and stop the job. If LM Studio keeps generating after client disconnect, cancel it in LM Studio too." ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop</button>
+        <a class="link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
+        <details class="job-more-actions">
+          <summary>More</summary>
+          <div>
+            <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all">Review Lines</button>
+            <button class="ghost" data-action="logs" data-id="${job.id}">View Log</button>
+            <button class="ghost" data-action="edit" data-id="${job.id}" ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Edit Context</button>
+            <button class="danger ghost" data-action="stop" data-id="${job.id}" ${(job.status !== "processing" && job.status !== "paused") ? "disabled" : ""}>Stop Job</button>
+          </div>
+        </details>
       </div>
       ${timeoutWarning ? `<div class="runtime-warning">${escapeHtml(timeoutWarning)}</div>` : ""}
       <div class="validation-summary">
@@ -2307,7 +2309,15 @@ function renderContext(job) {
         )}
       </div>
       ${renderVisionTimeline(job, true, "active")}
-      ${renderSessionSnapshot(ctx, false, delta)}
+      <details class="active-context-details">
+        <summary>
+          <div>
+            <strong>Full context card</strong>
+            <span>Premise, scene, style, characters, glossary, and ambiguities</span>
+          </div>
+        </summary>
+        <div class="active-context-details-body">${renderSessionSnapshot(ctx, false, delta)}</div>
+      </details>
       ${previous ? `
         <details class="context-history tile" data-context-history="${escapeHtml(job.id)}" ${expandedContextHistory.has(job.id) ? "open" : ""}>
           <summary class="context-history-summary">
@@ -2430,52 +2440,38 @@ function renderJobs(jobs) {
           : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
     <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
-      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
-        <span class="job-corner-label" aria-hidden="true">log</span>
-      </button>
       <div class="job-top">
         <div class="job-copy">
           <div class="job-headline">
-            <h3 class="job-title">${title}</h3>
-            <span class="job-kicker">${filename}</span>
+            <div class="job-identity">
+              <h3 class="job-title">${title}</h3>
+              <span class="job-kicker">${filename}</span>
+            </div>
             ${statusBadge(job.status)}
           </div>
           <div class="job-facts">
             <span class="job-fact">${escapeHtml(kind)}</span>
             <span class="job-fact">${sourceLanguage} → ${targetLanguage}</span>
             <span class="job-fact">${model}</span>
-            ${referenceLanguages.length ? `<span class="job-fact">Refs ${escapeHtml(referenceLanguages.join(", "))}</span>` : ""}
-            ${sceneVisionEnabled ? `<span class="job-fact">Visual scene guides</span>` : ""}
-            ${adaptiveVisionEnabled ? `<span class="job-fact">Vision doubt checks</span>` : ""}
-            ${vision.scene_cards_total ? `<span class="job-fact">Scene guides ${escapeHtml(String(vision.scene_cards_created || 0))}/${escapeHtml(String(vision.scene_cards_total))}</span>` : ""}
-            ${vision.clarification_requests ? `<span class="job-fact">Vision calls ${escapeHtml(String(vision.clarification_requests))}</span>` : ""}
-            ${vision.lines_revised ? `<span class="job-fact">Vision revised ${escapeHtml(String(vision.lines_revised))}</span>` : ""}
-            ${vision.clarification_failures ? `<span class="job-fact">Vision failed ${escapeHtml(String(vision.clarification_failures))}</span>` : ""}
-            <span class="job-fact">Progress ${progress}</span>
-            <span class="job-fact">Timeout ${escapeHtml(String(requestTimeout))}s</span>
-            ${(validation.suspicious_subtitles || fixedTotal || validation.error_subtitles) ? `
-              <span class="job-fact">Suspect ${escapeHtml(String(validation.suspicious_subtitles || 0))}</span>
-              <span class="job-fact">Fixed ${escapeHtml(String(fixedTotal))}</span>
-              <span class="job-fact">Error ${escapeHtml(String(validation.error_subtitles || 0))}</span>
-            ` : ""}
           </div>
           <div class="job-meta">${message}</div>
           ${renderRuntimeActivity(job, true)}
           ${timeoutWarning ? `<div class="runtime-warning compact">${escapeHtml(timeoutWarning)}</div>` : ""}
-          ${referenceTracks.length ? `
-            <div class="reference-track-summary-list">
-              ${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}
-            </div>
-          ` : ""}
-          ${renderVisionTimeline(job, true, "job")}
         </div>
-        <div class="job-actions">
-          <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
-          <button class="ghost" data-action="reload-job" data-id="${job.id}" title="${escapeHtml(reloadTitle)}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
-          <button class="ghost" data-action="edit" data-id="${job.id}" title="${escapeHtml(editContextTitle)}" ${!canEditContext ? "disabled" : ""}>Edit Context</button>
-          <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Inspect flagged subtitle lines and save manual fixes." ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
-          ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}" title="Download the current translated subtitle file.">Download</button>` : ""}
-          <button class="ghost" data-action="delete-job" data-id="${job.id}" title="Remove this job entry from the list. Active jobs must be paused or stopped first." ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete</button>
+        <div class="job-actions job-primary-actions">
+          ${canResume ? `<button data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}">${escapeHtml(resumeLabel)}</button>` : ""}
+          <a class="ghost link-button" href="/review/${job.id}">Open Workspace</a>
+          ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}">Download</button>` : ""}
+          <details class="job-more-actions">
+            <summary>More</summary>
+            <div>
+              <button class="ghost" data-action="reload-job" data-id="${job.id}" title="${escapeHtml(reloadTitle)}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
+              <button class="ghost" data-action="edit" data-id="${job.id}" title="${escapeHtml(editContextTitle)}" ${!canEditContext ? "disabled" : ""}>Edit Context</button>
+              <button class="ghost" data-action="review-lines" data-id="${job.id}" data-filter="all" ${issueCount ? "" : "disabled"}>Review Lines${issueCount ? ` (${issueCount})` : ""}</button>
+              <button class="ghost" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">View Log</button>
+              <button class="danger ghost" data-action="delete-job" data-id="${job.id}" ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete Job</button>
+            </div>
+          </details>
         </div>
       </div>
       <div class="job-progress-row">
@@ -2484,6 +2480,21 @@ function renderJobs(jobs) {
       </div>
       ${renderEtaPill(job)}
       <div class="progress"><div class="progress-bar" style="width:${job.progress || 0}%"></div></div>
+      <div class="job-health" aria-label="Job validation summary">
+        <span><small>Lines</small><strong>${escapeHtml(String(sourceCount || 0))}</strong></span>
+        <span class="is-suspect"><small>Suspect</small><strong>${escapeHtml(String(validation.suspicious_subtitles || 0))}</strong></span>
+        <span class="is-fixed"><small>Fixed</small><strong>${escapeHtml(String(fixedTotal))}</strong></span>
+        <span class="is-error"><small>Errors</small><strong>${escapeHtml(String(validation.error_subtitles || 0))}</strong></span>
+      </div>
+      ${(referenceTracks.length || visionEnabled) ? `
+        <details class="job-auxiliary-details">
+          <summary>Context &amp; evidence <span>${referenceTracks.length ? `${escapeHtml(String(referenceTracks.length))} ref` : ""}${referenceTracks.length && visionEnabled ? " · " : ""}${visionEnabled ? "vision enabled" : ""}</span></summary>
+          <div>
+            ${referenceTracks.length ? `<div class="reference-track-summary-list">${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}</div>` : ""}
+            ${renderVisionTimeline(job, true, "job")}
+          </div>
+        </details>
+      ` : ""}
     </article>
   `;
     }).join("")}</div>
