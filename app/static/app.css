@@ -930,7 +930,7 @@ button.danger {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  padding: 0.25rem 0.1rem 0.35rem;
+  padding: 1.05rem 0.1rem 0.65rem;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
@@ -980,6 +980,7 @@ button.danger {
   opacity: var(--frame-opacity);
   transform-origin: bottom center;
   transform: scale(var(--frame-scale, 1));
+  z-index: var(--frame-z, 0);
   transition: transform 160ms ease, border-color 160ms ease, opacity 160ms ease;
   padding: 0;
   appearance: none;
@@ -3492,7 +3493,7 @@ code {
 }
 .job-auxiliary-details .vision-rail {
   gap: 0.7rem;
-  padding-block: 0.4rem 0.55rem;
+  padding-block: 1.2rem 0.75rem;
 }
 .job-auxiliary-details .vision-timeline-stats span,
 .job-auxiliary-details .vision-rail-control {

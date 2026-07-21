@@ -355,17 +355,19 @@ function updateVisionRailFocus(rail) {
   if (!frames.length) return;
   const railRect = rail.getBoundingClientRect();
   const focusCenter = railRect.left + (railRect.width / 2);
-  const focusRange = Math.max(railRect.width * 0.58, 180);
+  const focusRange = Math.max(railRect.width * 0.52, 180);
 
   for (const frame of frames) {
-    const frameRect = frame.getBoundingClientRect();
-    const frameCenter = frameRect.left + (frameRect.width / 2);
+    // Use the untransformed layout position so scaling a focused frame cannot
+    // change the next focus calculation and make the carousel pulse or jitter.
+    const frameCenter = railRect.left + frame.offsetLeft - rail.scrollLeft + (frame.offsetWidth / 2);
     const distance = Math.abs(frameCenter - focusCenter);
     const focus = Math.max(0, 1 - (distance / focusRange));
-    const opacity = 0.52 + (0.48 * focus);
-    const scale = 0.84 + (0.16 * focus);
+    const opacity = 0.4 + (0.6 * focus);
+    const scale = 0.68 + (0.44 * focus);
     frame.style.setProperty("--frame-opacity", opacity.toFixed(2));
     frame.style.setProperty("--frame-scale", scale.toFixed(3));
+    frame.style.setProperty("--frame-z", String(Math.round(focus * 10)));
   }
 }
 
