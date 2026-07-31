@@ -18,6 +18,16 @@ const tableColumns = document.getElementById("review-table-columns");
 const columnControls = document.getElementById("review-column-controls");
 const columnResetBtn = document.getElementById("review-column-reset");
 const sideBody = document.getElementById("review-side-body");
+const sidePanel = document.querySelector(".review-side-panel");
+const syncStatusEl = document.getElementById("review-sync-status");
+const toastEl = document.getElementById("review-toast");
+const reviewConfirmDialog = document.getElementById("review-confirm-dialog");
+const reviewConfirmTitle = document.getElementById("review-confirm-title");
+const reviewConfirmMessage = document.getElementById("review-confirm-message");
+const reviewConfirmCancel = document.getElementById("review-confirm-cancel");
+const reviewConfirmSubmit = document.getElementById("review-confirm-submit");
+const jumpLineEl = document.getElementById("review-jump-line");
+const densityButtons = [...document.querySelectorAll("[data-review-density]")];
 const snapshotDialog = document.getElementById("review-snapshot-dialog");
 const snapshotTitle = document.getElementById("review-snapshot-title");
 const snapshotBody = document.getElementById("review-snapshot-body");
@@ -25,6 +35,8 @@ const saveSnapshotBtn = document.getElementById("review-save-snapshot");
 const generateSnapshotBtn = document.getElementById("review-generate-snapshot");
 
 const jobId = window.location.pathname.split("/").filter(Boolean).pop();
+const VALID_REVIEW_FILTERS = new Set(["all", "suspect", "error", "fixed", "edited", "active", "pending", "missing", "normal"]);
+const requestedReviewFilter = new URLSearchParams(window.location.search).get("filter");
 const REVIEW_SCROLL_STATE_KEY = `ai-subcontext-review-scroll-state:${jobId}`;
 const REVIEW_UI_STATE_KEY = `ai-subcontext-review-ui-state:${jobId}`;
 const REVIEW_COLUMN_STATE_KEY = "ai-subcontext-review-columns:v2";
@@ -41,24 +53,92 @@ const REVIEW_COLUMN_DEFINITIONS = {
 };
 const DEFAULT_REVIEW_COLUMN_ORDER = ["line", "status", "reason", "subtitle", "source", "translation", "time", "refs", "batch"];
 let currentJob = null;
-let currentFilter = "all";
+let currentFilter = VALID_REVIEW_FILTERS.has(requestedReviewFilter) ? requestedReviewFilter : "all";
 let currentSearch = "";
 let selectedPosition = null;
 let openBatchIndex = null;
 let autoRewritePending = false;
 let autoRewriteAbort = false;
+let autoRewriteProgress = null;
 const transientSuspectResolved = new Set();
 const selectedPositions = new Set();
 let selectionAnchorPosition = null;
 const lineDrafts = new Map();
 const instructionDrafts = new Map();
 const contextDrafts = new Map();
+const loadedBatchSnapshots = new Map();
 let reviewScrollRestorePending = true;
 let reviewScrollSaveFrame = null;
 let reviewUiRestorePending = true;
 let reviewUiSaveFrame = null;
 let reviewColumnState = loadReviewColumnState();
 let resizingColumn = null;
+let reviewDensity = "comfortable";
+let lastReviewPayload = "";
+let reviewFetchSequence = 0;
+let reviewFetchController = null;
+let reviewFetchInFlight = false;
+let reviewMutationDepth = 0;
+let reviewConnectionFailed = false;
+let pendingReviewRender = false;
+let toastTimer = null;
+let bulkActionPending = false;
+let lineActionPending = false;
+let batchCardOperationToken = 0;
+let pendingReviewConfirmationResolve = null;
+const rawEditorOpenPositions = new Set();
+
+function setReviewSyncStatus(message, tone = "live") {
+  if (!syncStatusEl) return;
+  syncStatusEl.textContent = message;
+  syncStatusEl.dataset.tone = tone;
+}
+
+function showReviewToast(message, tone = "info") {
+  if (!toastEl) return;
+  toastEl.textContent = message;
+  toastEl.dataset.tone = tone;
+  toastEl.hidden = false;
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toastEl.hidden = true;
+    toastTimer = null;
+  }, 4200);
+}
+
+function requestReviewConfirmation({ title, message, confirmLabel = "Continue", tone = "danger" }) {
+  if (!reviewConfirmDialog || !reviewConfirmTitle || !reviewConfirmMessage || !reviewConfirmSubmit) {
+    return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+  }
+  if (pendingReviewConfirmationResolve) return Promise.resolve(false);
+  reviewConfirmTitle.textContent = title;
+  reviewConfirmMessage.textContent = message;
+  reviewConfirmSubmit.textContent = confirmLabel;
+  reviewConfirmSubmit.classList.toggle("danger", tone === "danger");
+  reviewConfirmSubmit.classList.toggle("warn", tone === "warning");
+  reviewConfirmDialog.dataset.tone = tone;
+  reviewConfirmDialog.showModal();
+  requestAnimationFrame(() => reviewConfirmCancel?.focus());
+  return new Promise(resolve => {
+    pendingReviewConfirmationResolve = resolve;
+  });
+}
+
+function settleReviewConfirmation(confirmed) {
+  const resolve = pendingReviewConfirmationResolve;
+  pendingReviewConfirmationResolve = null;
+  if (reviewConfirmDialog?.open) reviewConfirmDialog.close(confirmed ? "confirm" : "cancel");
+  resolve?.(confirmed);
+}
+
+function applyReviewDensity() {
+  document.body.dataset.reviewDensity = reviewDensity;
+  for (const button of densityButtons) {
+    const active = button.dataset.reviewDensity === reviewDensity;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -187,7 +267,11 @@ function loadReviewColumnState() {
 }
 
 function saveReviewColumnState() {
-  localStorage.setItem(REVIEW_COLUMN_STATE_KEY, JSON.stringify(reviewColumnState));
+  try {
+    localStorage.setItem(REVIEW_COLUMN_STATE_KEY, JSON.stringify(reviewColumnState));
+  } catch (_) {
+    showReviewToast("Column changes work for this session, but could not be saved in browser storage.", "warning");
+  }
 }
 
 function visibleReviewColumns() {
@@ -196,12 +280,26 @@ function visibleReviewColumns() {
 
 function renderColumnControls() {
   if (!columnControls) return;
-  columnControls.innerHTML = reviewColumnState.map(column => `
-    <label>
-      <input type="checkbox" data-column-visible="${escapeHtml(column.key)}" ${column.visible ? "checked" : ""} />
-      <span>${escapeHtml(REVIEW_COLUMN_DEFINITIONS[column.key].label)}</span>
-    </label>
-  `).join("");
+  columnControls.innerHTML = reviewColumnState.map((column, index) => {
+    const label = REVIEW_COLUMN_DEFINITIONS[column.key].label;
+    return `
+      <div class="review-column-option">
+        <label>
+          <input type="checkbox" data-column-visible="${escapeHtml(column.key)}" ${column.visible ? "checked" : ""} />
+          <span>${escapeHtml(label)}</span>
+        </label>
+        <div class="review-column-option-actions">
+          <button type="button" class="ghost" data-column-move="left" data-column-key="${escapeHtml(column.key)}" aria-label="Move ${escapeHtml(label)} left" ${index === 0 ? "disabled" : ""}>←</button>
+          <button type="button" class="ghost" data-column-move="right" data-column-key="${escapeHtml(column.key)}" aria-label="Move ${escapeHtml(label)} right" ${index === reviewColumnState.length - 1 ? "disabled" : ""}>→</button>
+          <label class="review-column-width-label">
+            <span class="sr-only">${escapeHtml(label)} width in pixels</span>
+            <input type="number" data-column-width="${escapeHtml(column.key)}" min="48" max="720" step="8" value="${escapeHtml(String(column.width))}" />
+            <span aria-hidden="true">px</span>
+          </label>
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function renderTableStructure() {
@@ -213,9 +311,20 @@ function renderTableStructure() {
   }
   if (tableHeader) {
     tableHeader.innerHTML = columns.map(column => `
-      <th draggable="true" data-column-header="${escapeHtml(column.key)}" title="Drag to reorder">
+      <th scope="col" draggable="true" data-column-header="${escapeHtml(column.key)}" title="Drag to reorder">
         <span>${escapeHtml(REVIEW_COLUMN_DEFINITIONS[column.key].label)}</span>
-        <span class="review-column-resizer" data-column-resize="${escapeHtml(column.key)}" title="Drag to resize"></span>
+        <span
+          class="review-column-resizer"
+          data-column-resize="${escapeHtml(column.key)}"
+          title="Drag or use arrow keys to resize"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-label="Resize ${escapeHtml(REVIEW_COLUMN_DEFINITIONS[column.key].label)} column"
+          aria-valuemin="48"
+          aria-valuemax="720"
+          aria-valuenow="${escapeHtml(String(column.width))}"
+        ></span>
       </th>
     `).join("");
   }
@@ -238,7 +347,11 @@ function readScrollState(storageKey) {
 }
 
 function writeScrollState(storageKey, state) {
-  sessionStorage.setItem(storageKey, JSON.stringify(state));
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(state));
+  } catch (_) {
+    // Review remains usable without persisted scroll position.
+  }
 }
 
 function readSessionState(storageKey) {
@@ -253,7 +366,11 @@ function readSessionState(storageKey) {
 }
 
 function writeSessionState(storageKey, state) {
-  sessionStorage.setItem(storageKey, JSON.stringify(state));
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(state));
+  } catch (_) {
+    // Draft input remains in the DOM; only cross-navigation recovery is unavailable.
+  }
 }
 
 function parseStoredNumber(value) {
@@ -276,6 +393,8 @@ function saveReviewScrollState() {
   writeScrollState(REVIEW_SCROLL_STATE_KEY, {
     windowScrollTop: window.scrollY || 0,
     tableScrollTop: tableWrap?.scrollTop || 0,
+    tableScrollLeft: tableWrap?.scrollLeft || 0,
+    sideScrollTop: sideBody?.scrollTop || 0,
   });
 }
 
@@ -296,15 +415,20 @@ function restoreReviewScrollState() {
   window.scrollTo({ top: Number(state.windowScrollTop || 0), behavior: "auto" });
   if (tableWrap) {
     tableWrap.scrollTop = Number(state.tableScrollTop || 0);
+    tableWrap.scrollLeft = Number(state.tableScrollLeft || 0);
   }
+  if (sideBody) sideBody.scrollTop = Number(state.sideScrollTop || 0);
 }
 
 function captureReviewUiState() {
   return {
     windowScrollTop: window.scrollY || 0,
     tableScrollTop: reviewScrollContainer()?.scrollTop || 0,
+    tableScrollLeft: reviewScrollContainer()?.scrollLeft || 0,
+    sideScrollTop: sideBody?.scrollTop || 0,
     currentFilter,
     currentSearch,
+    reviewDensity,
     selectedPosition,
     selectedPositions: [...selectedPositions],
     selectionAnchorPosition,
@@ -312,6 +436,7 @@ function captureReviewUiState() {
     lineDrafts: [...lineDrafts.entries()],
     instructionDrafts: [...instructionDrafts.entries()],
     contextDrafts: [...contextDrafts.entries()],
+    rawEditorOpenPositions: [...rawEditorOpenPositions],
   };
 }
 
@@ -331,9 +456,18 @@ function restoreReviewUiState() {
   if (!reviewUiRestorePending) return;
   reviewUiRestorePending = false;
   const state = readSessionState(REVIEW_UI_STATE_KEY);
-  if (!state) return;
-  currentFilter = state.currentFilter || "all";
-  currentSearch = state.currentSearch || "";
+  if (!state) {
+    applyReviewDensity();
+    return;
+  }
+  currentFilter = VALID_REVIEW_FILTERS.has(requestedReviewFilter)
+    ? requestedReviewFilter
+    : VALID_REVIEW_FILTERS.has(state.currentFilter)
+      ? state.currentFilter
+      : "all";
+  currentSearch = VALID_REVIEW_FILTERS.has(requestedReviewFilter) ? "" : (state.currentSearch || "");
+  reviewDensity = state.reviewDensity === "compact" ? "compact" : "comfortable";
+  applyReviewDensity();
   if (searchEl) searchEl.value = currentSearch;
   selectedPosition = parseStoredNumber(state.selectedPosition);
   selectedPositions.clear();
@@ -354,6 +488,11 @@ function restoreReviewUiState() {
   contextDrafts.clear();
   for (const [key, value] of Array.isArray(state.contextDrafts) ? state.contextDrafts : []) {
     contextDrafts.set(key, value);
+  }
+  rawEditorOpenPositions.clear();
+  for (const value of Array.isArray(state.rawEditorOpenPositions) ? state.rawEditorOpenPositions : []) {
+    const position = Number(value);
+    if (Number.isFinite(position)) rawEditorOpenPositions.add(position);
   }
 }
 
@@ -400,8 +539,8 @@ function splitListText(value) {
     .filter(Boolean);
 }
 
-function statusBadge(status) {
-  const label = {
+function statusLabel(status) {
+  return {
     normal: "Ready",
     pending: "Pending",
     translating: "Translating",
@@ -413,6 +552,10 @@ function statusBadge(status) {
     auto_fixed: "Auto Fixed",
     manual_fixed: "Edited",
   }[status] || status;
+}
+
+function statusBadge(status) {
+  const label = statusLabel(status);
   return `<span class="badge ${escapeHtml(status)}">${escapeHtml(label)}</span>`;
 }
 
@@ -510,11 +653,11 @@ function renderReferenceLines(references) {
     `;
   }
   return `
-    <div class="review-source-block">
+    <div class="review-source-block" dir="auto">
       <div class="mini-eyebrow">Reference Lines</div>
       <div class="reference-line-list">
         ${references.map(reference => `
-          <article class="reference-line-card">
+          <article class="reference-line-card" lang="${escapeHtml(reference.language || "")}" dir="auto">
             <div class="reference-line-meta">
               <span class="job-fact">${escapeHtml(reference.language.toUpperCase())}</span>
               <span class="job-fact">Confidence ${escapeHtml(formatConfidence(reference.confidence))}</span>
@@ -807,23 +950,30 @@ function lineKey(position) {
 }
 
 function getLines(job) {
-  const translatedMap = new Map((job.translated_lines || []).map(line => [Number(line.position), line.text || ""]));
+  const sourceMap = new Map((job.original_lines || []).map(line => [Number(line.position), line]));
+  const translatedMap = new Map((job.translated_lines || []).map(line => [Number(line.position), line]));
   const issueMap = new Map((job.validation_issues || []).map(issue => [Number(issue.position), issue]));
   const referenceMap = buildReferenceMap(job);
-  return (job.original_lines || []).map(line => {
-    const position = Number(line.position);
+  const positions = [...new Set([...sourceMap.keys(), ...translatedMap.keys(), ...issueMap.keys()])]
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const translatedTextMap = new Map([...translatedMap].map(([position, line]) => [position, line?.text || ""]));
+  return positions.map(position => {
+    const line = sourceMap.get(position) || null;
+    const translatedLine = translatedMap.get(position) || null;
     const issue = issueMap.get(position) || null;
-    const status = lineStatus(job, issue, position, translatedMap);
+    const status = lineStatus(job, issue, position, translatedTextMap);
     const reasonTags = Array.isArray(issue?.reason_codes) && issue.reason_codes.length
       ? [...new Set(issue.reason_codes.map(code => String(code || "").trim()).filter(Boolean))]
       : inferReasonTags(issue);
     const references = referenceMap.get(position) || [];
     return {
       position,
-      source_text: line.text || "",
-      start_time: line.start_time || "",
-      end_time: line.end_time || "",
-      translated_text: translatedMap.get(position) || "",
+      has_source: Boolean(line),
+      source_text: line?.text || "",
+      start_time: line?.start_time || translatedLine?.start_time || "",
+      end_time: line?.end_time || translatedLine?.end_time || "",
+      translated_text: translatedLine?.text || "",
       reference_subtitles: references,
       issue,
       status,
@@ -853,6 +1003,8 @@ function filteredLines(job) {
         line.source_text,
         lineDrafts.get(lineKey(line.position)) ?? line.translated_text,
         line.status,
+        line.status.replaceAll("_", " "),
+        statusLabel(line.status),
         ...line.reason_tags.map(compactReasonLabel),
         ...line.reference_subtitles.map(item => [item.language, item.filename, item.text, item.alignment_mode].join(" ")),
       ].join("\n").toLowerCase();
@@ -895,8 +1047,9 @@ function renderFilters(job) {
       type="button"
       class="review-filter filter-${escapeHtml(key)} ${currentFilter === key ? "is-active" : ""}"
       data-filter="${escapeHtml(key)}"
+      aria-pressed="${currentFilter === key ? "true" : "false"}"
     >
-      ${escapeHtml(label)} (${escapeHtml(String(counts[key] || 0))})
+      <span>${escapeHtml(label)}</span><strong>${escapeHtml(String(counts[key] || 0))}</strong>
     </button>
   `).join("");
 }
@@ -906,17 +1059,27 @@ function clearTransientSuspectResolved() {
 }
 
 function updateToolbarState(job) {
-  if (!autoRewriteNextBtn) return;
-  const flaggedCount = filteredLines(job)
-    .filter(line => line.status === "suspect" || line.status === "error")
-    .length;
-  autoRewriteNextBtn.disabled = autoRewritePending || !flaggedCount;
-  autoRewriteNextBtn.disabled = !autoRewritePending && !flaggedCount;
-  autoRewriteNextBtn.textContent = autoRewritePending ? "Stop Auto Rewrite" : "Auto Rewrite All";
+  const flaggedLines = filteredLines(job)
+    .filter(line => line.status === "suspect" || line.status === "error");
+  const flaggedCount = flaggedLines.length;
+  const rewriteCount = flaggedLines.filter(line => line.has_source).length;
+  if (autoRewriteNextBtn) {
+    autoRewriteNextBtn.disabled = !autoRewritePending && !rewriteCount;
+    autoRewriteNextBtn.textContent = autoRewritePending
+      ? `Stop Auto Rewrite${autoRewriteProgress ? ` · ${autoRewriteProgress.current}/${autoRewriteProgress.total}` : ""}`
+      : `Auto Rewrite All${rewriteCount ? ` (${rewriteCount})` : ""}`;
+    if (autoRewritePending) autoRewriteNextBtn.setAttribute("aria-busy", "true");
+    else autoRewriteNextBtn.removeAttribute("aria-busy");
+  }
+  if (prevFlaggedBtn) prevFlaggedBtn.disabled = !flaggedCount;
+  if (nextFlaggedBtn) nextFlaggedBtn.disabled = !flaggedCount;
 }
 
 function renderReviewTableCell(columnKey, line, translated, timeLabel) {
   const emptyTranslation = `<span>${line.status === "pending" ? "Waiting for translation" : (line.status === "translating" ? "Model is translating this line" : "No translation returned")}</span>`;
+  const sourceContent = line.source_text
+    ? renderSubtitlePreview(line.source_text, { compact: true })
+    : `<span class="job-meta">Extra translated cue — no source line</span>`;
   const content = {
     line: escapeHtml(String(line.position + 1)),
     time: `<div class="table-time">${escapeHtml(timeLabel)}</div>`,
@@ -926,7 +1089,7 @@ function renderReviewTableCell(columnKey, line, translated, timeLabel) {
       <div class="stacked-subtitle-pair">
         <div class="stacked-subtitle-part source">
           <span class="stacked-subtitle-label">Source</span>
-          ${renderSubtitlePreview(line.source_text, { compact: true })}
+          ${sourceContent}
         </div>
         <div class="stacked-subtitle-part translation ${translated ? "" : "is-empty"}">
           <span class="stacked-subtitle-label">Translation</span>
@@ -934,7 +1097,7 @@ function renderReviewTableCell(columnKey, line, translated, timeLabel) {
         </div>
       </div>
     `,
-    source: `<div class="table-copy">${renderSubtitlePreview(line.source_text, { compact: true })}</div>`,
+    source: `<div class="table-copy">${sourceContent}</div>`,
     translation: `<div class="table-copy ${translated ? "" : "is-empty"}">${
       translated
         ? renderSubtitlePreview(translated, { compact: true })
@@ -964,7 +1127,11 @@ function renderTable(job) {
     const translated = draft ?? line.translated_text;
     const timeLabel = line.start_time && line.end_time ? `${line.start_time} - ${line.end_time}` : "-";
     return `
-      <tr class="review-row ${escapeHtml(line.status)} ${selectedPosition === line.position ? "is-selected" : ""} ${selectedPositions.has(line.position) ? "is-marked" : ""}" data-row-position="${escapeHtml(String(line.position))}">
+      <tr class="review-row ${escapeHtml(line.status)} ${selectedPosition === line.position ? "is-selected" : ""} ${selectedPositions.has(line.position) ? "is-marked" : ""}"
+          data-row-position="${escapeHtml(String(line.position))}"
+          tabindex="${selectedPosition === line.position ? "0" : "-1"}"
+          aria-selected="${selectedPosition === line.position || selectedPositions.has(line.position) ? "true" : "false"}"
+          aria-label="Line ${escapeHtml(String(line.position + 1))}, ${escapeHtml(line.status.replaceAll("_", " "))}">
         ${columns.map(column => renderReviewTableCell(column.key, line, translated, timeLabel)).join("")}
       </tr>
     `;
@@ -992,7 +1159,12 @@ function selectedVisibleLines(job) {
   return getLines(job).filter(line => visible.has(line.position) && selectedPositions.has(line.position));
 }
 
+function reviewActionBusy() {
+  return lineActionPending || bulkActionPending || autoRewritePending || batchCardOperationToken !== 0;
+}
+
 function renderSide(job) {
+  const actionBusy = reviewActionBusy();
   const multiSelectedLines = selectedVisibleLines(job);
   if (multiSelectedLines.length > 1) {
     const suspectCount = multiSelectedLines.filter(line => line.status === "suspect").length;
@@ -1019,9 +1191,9 @@ function renderSide(job) {
         <input id="workspace-bulk-instruction" type="text" placeholder="Optional instruction for selected lines" />
       </label>
       <div class="review-actions">
-        <button type="button" class="ghost" id="workspace-clear-selection">Clear Selection</button>
-        <button type="button" class="ghost" id="workspace-bulk-retranslate">Retranslate Selected</button>
-        <button type="button" id="workspace-bulk-resolve">Resolve Selected</button>
+        <button type="button" class="ghost" id="workspace-clear-selection" ${actionBusy ? "disabled" : ""}>Clear Selection</button>
+        <button type="button" class="ghost" id="workspace-bulk-retranslate" ${actionBusy ? "disabled aria-busy=\"true\"" : ""}>${actionBusy ? "Working…" : "Retranslate Selected"}</button>
+        <button type="button" id="workspace-bulk-resolve" ${actionBusy ? "disabled aria-busy=\"true\"" : ""}>${actionBusy ? "Working…" : "Resolve Selected"}</button>
       </div>
     `;
     return;
@@ -1054,21 +1226,21 @@ function renderSide(job) {
     ${line.reason_tags.length ? `<div class="review-reason-row">${renderReasonTags(line.reason_tags)}</div>` : ""}
     <div class="review-source-block">
       <div class="mini-eyebrow">Source</div>
-      ${renderSubtitlePreview(line.source_text)}
+      ${line.source_text ? renderSubtitlePreview(line.source_text) : `<p class="job-meta">Extra translated cue — there is no matching source line.</p>`}
     </div>
     ${renderReferenceLines(line.reference_subtitles)}
-    <div class="review-translation-block">
+    <div class="review-translation-block" lang="${escapeHtml(job.settings?.target_language || "")}" dir="auto">
       <div class="mini-eyebrow">Translation</div>
       <div id="workspace-translation-preview">${draft ? renderSubtitlePreview(draft) : ""}</div>
     </div>
-    <details class="review-raw-editor" ${formattingNeedsAttention ? "open" : ""}>
+    <details class="review-raw-editor" data-raw-editor-position="${escapeHtml(String(line.position))}" ${formattingNeedsAttention || rawEditorOpenPositions.has(line.position) ? "open" : ""}>
       <summary>
         <span>Formatting & raw text</span>
         ${formattingNeedsAttention ? `<span class="subtitle-format-warning">check formatting</span>` : ""}
       </summary>
       <label class="review-edit">
         <span class="sr-only">Raw translation text</span>
-        <textarea id="workspace-translation">${escapeHtml(draft)}</textarea>
+        <textarea id="workspace-translation" lang="${escapeHtml(job.settings?.target_language || "")}" dir="auto">${escapeHtml(draft)}</textarea>
       </label>
     </details>
     <div class="review-retranslate-group">
@@ -1076,14 +1248,20 @@ function renderSide(job) {
         <strong>Retranslate Instruction</strong>
         <input id="workspace-instruction" type="text" value="${escapeHtml(instruction)}" placeholder="Optional instruction for this line only" />
       </label>
-      <button type="button" class="ghost" id="workspace-retranslate">${job.status === "processing" || job.status === "queued" ? "Queue Retranslate" : "Retranslate"}</button>
+      <button type="button" class="ghost" id="workspace-retranslate" ${actionBusy || !line.has_source ? "disabled" : ""} ${actionBusy ? "aria-busy=\"true\"" : ""} ${!line.has_source ? "title=\"Extra output has no source cue to retranslate. Edit or remove it instead.\"" : ""}>${actionBusy ? "Working…" : (job.status === "processing" || job.status === "queued" ? "Queue Retranslate" : "Retranslate")}</button>
     </div>
     ${notes.length ? `<div class="issue-notes">${notes.map(note => `<div>${escapeHtml(note)}</div>`).join("")}</div>` : ""}
     <div class="review-actions review-decision-bar">
-      <button type="button" id="workspace-save" data-mode="${escapeHtml(action.mode)}">${escapeHtml(action.label)}</button>
-      <button type="button" class="ghost" id="workspace-batch-card">Batch Card</button>
-      <button type="button" class="danger ghost" id="workspace-remove">Remove Subtitle</button>
+      <button type="button" id="workspace-save" data-mode="${escapeHtml(action.mode)}" ${actionBusy ? "disabled aria-busy=\"true\"" : ""}>${actionBusy ? "Working…" : escapeHtml(action.label)}</button>
+      <button type="button" class="ghost" id="workspace-batch-card" ${actionBusy || !line.has_source ? "disabled" : ""} ${!line.has_source ? "title=\"This extra output has no source batch.\"" : ""}>Batch Card</button>
+      ${action.mode === "remove" ? "" : `<button type="button" class="danger ghost" id="workspace-remove" ${actionBusy ? "disabled" : ""}>Remove Subtitle</button>`}
     </div>
+    <div class="review-keyboard-hint" aria-label="Keyboard shortcuts">
+      <span><kbd>↑</kbd><kbd>↓</kbd> lines</span>
+      <span><kbd>/</kbd> search</span>
+      <span><kbd>Ctrl</kbd><kbd>S</kbd> save</span>
+    </div>
+    <button type="button" class="ghost review-return-list" data-review-return-list>Back to selected line in list</button>
   `;
 }
 
@@ -1099,7 +1277,13 @@ function renderHeader(job) {
     progressValueEl.textContent = progress;
   }
   if (progressBarEl) {
-    progressBarEl.style.width = `${Math.max(0, Math.min(100, Number(job.progress || 0)))}%`;
+    const numericProgress = Math.max(0, Math.min(100, Number(job.progress || 0)));
+    progressBarEl.style.width = `${numericProgress}%`;
+    progressBarEl.parentElement?.setAttribute("role", "progressbar");
+    progressBarEl.parentElement?.setAttribute("aria-label", "Job progress");
+    progressBarEl.parentElement?.setAttribute("aria-valuemin", "0");
+    progressBarEl.parentElement?.setAttribute("aria-valuemax", "100");
+    progressBarEl.parentElement?.setAttribute("aria-valuenow", String(numericProgress));
   }
   if (progressCardEl) {
     progressCardEl.classList.toggle("is-idle", !["processing", "paused", "queued", "failed", "completed"].includes(job.status));
@@ -1116,69 +1300,158 @@ function renderAll() {
   scheduleReviewUiSave();
 }
 
-async function fetchJob() {
-  const response = await fetch(`/api/jobs/${jobId}`);
-  if (!response.ok) {
-    titleEl.textContent = "Review Workspace";
-    metaEl.textContent = "Job not found";
-    tableBody.innerHTML = `<tr><td colspan="7" class="job-meta">Job not found.</td></tr>`;
-    sideBody.innerHTML = `<p class="job-meta">This review workspace could not load the job.</p>`;
+function reviewHasActiveEditor() {
+  const activeEditor = document.activeElement;
+  const isEditable = activeEditor instanceof HTMLInputElement
+    || activeEditor instanceof HTMLTextAreaElement
+    || activeEditor instanceof HTMLSelectElement
+    || activeEditor?.getAttribute?.("contenteditable") === "true";
+  return Boolean(isEditable && (
+    activeEditor.closest(".review-header")
+    || activeEditor.closest(".review-side-body")
+    || activeEditor.closest(".review-column-menu")
+  )) || Boolean(snapshotDialog.open) || Boolean(resizingColumn);
+}
+
+function applyFetchedReviewJob() {
+  if (!currentJob || reviewHasActiveEditor()) {
+    pendingReviewRender = true;
     return;
   }
-  currentJob = await response.json();
-  const activeEditor = document.activeElement;
-  const isEditing = activeEditor && (
-    activeEditor.closest(".review-header") ||
-    activeEditor.closest(".review-side-body") ||
-    activeEditor.closest(".review-column-menu") ||
-    activeEditor.closest("#review-snapshot-dialog")
-  ) || Boolean(resizingColumn);
-  if (!isEditing) {
-    restoreReviewUiState();
-    renderAll();
-    if (openBatchIndex !== null) {
-      const batch = deriveBatchInfo(currentJob, openBatchIndex);
-      if (batch) {
-        renderSnapshotDialog(currentJob, openBatchIndex);
-        if (!snapshotDialog.open) {
-          snapshotDialog.showModal();
-        }
-      } else {
-        openBatchIndex = null;
-        saveReviewUiState();
-        if (snapshotDialog.open) {
-          snapshotDialog.close();
-        }
-      }
-    }
-    if (snapshotDialog.open && openBatchIndex !== null) {
+  pendingReviewRender = false;
+  restoreReviewUiState();
+  renderAll();
+  if (openBatchIndex !== null) {
+    const batch = deriveBatchInfo(currentJob, openBatchIndex);
+    if (batch) {
       renderSnapshotDialog(currentJob, openBatchIndex);
+      if (!snapshotDialog.open) snapshotDialog.showModal();
+    } else {
+      openBatchIndex = null;
+      saveReviewUiState();
+      if (snapshotDialog.open) snapshotDialog.close();
     }
-    requestAnimationFrame(() => {
-      restoreReviewScrollState();
-    });
+  }
+  if (snapshotDialog.open && openBatchIndex !== null) {
+    renderSnapshotDialog(currentJob, openBatchIndex);
+  }
+  requestAnimationFrame(() => restoreReviewScrollState());
+}
+
+async function fetchJob({ force = false } = {}) {
+  if (reviewMutationDepth > 0) return;
+  if (reviewFetchInFlight && !force) return;
+  const sequence = ++reviewFetchSequence;
+  if (force) reviewFetchController?.abort();
+  const controller = new AbortController();
+  reviewFetchController = controller;
+  reviewFetchInFlight = true;
+  if (force) setReviewSyncStatus("Syncing…", "syncing");
+  try {
+    const response = await fetch(`/api/jobs/${jobId}?view=review`, { signal: controller.signal });
+    if (sequence !== reviewFetchSequence) return;
+    if (!response.ok) {
+      if (response.status === 404) {
+        titleEl.textContent = "Review Workspace";
+        metaEl.textContent = "Job not found";
+        tableBody.innerHTML = `<tr><td colspan="7" class="job-meta">Job not found.</td></tr>`;
+        sideBody.innerHTML = `<p class="job-meta">This review workspace could not load the job.</p>`;
+        setReviewSyncStatus("Job not found", "error");
+        return;
+      }
+      throw new Error(`Server returned ${response.status}`);
+    }
+    const payload = await response.text();
+    if (sequence !== reviewFetchSequence) return;
+    const changed = payload !== lastReviewPayload;
+    if (changed) {
+      currentJob = JSON.parse(payload);
+      lastReviewPayload = payload;
+      pendingReviewRender = true;
+    }
+    if (changed || pendingReviewRender || force) applyFetchedReviewJob();
+    const recovered = reviewConnectionFailed;
+    reviewConnectionFailed = false;
+    setReviewSyncStatus(pendingReviewRender ? "Update ready · finish editing" : "Live", pendingReviewRender ? "paused" : "live");
+    if (recovered) showReviewToast("Connection restored. Review data is current.", "success");
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (sequence !== reviewFetchSequence) return;
+    setReviewSyncStatus("Offline · retrying", "error");
+    if (!reviewConnectionFailed) {
+      showReviewToast("Could not refresh the job. Your local drafts are preserved while the app retries.", "error");
+    }
+    reviewConnectionFailed = true;
+  } finally {
+    if (reviewFetchController === controller) {
+      reviewFetchController = null;
+      reviewFetchInFlight = false;
+    }
   }
 }
 
+function pauseReviewPollingForMutation(message = "Saving…") {
+  reviewMutationDepth += 1;
+  if (reviewMutationDepth === 1) {
+    reviewFetchSequence += 1;
+    reviewFetchController?.abort();
+    reviewFetchController = null;
+    reviewFetchInFlight = false;
+  }
+  setReviewSyncStatus(message, "syncing");
+}
+
+function finishReviewMutation({ refresh = true, status = "Live", tone = "live" } = {}) {
+  reviewMutationDepth = Math.max(0, reviewMutationDepth - 1);
+  if (reviewMutationDepth > 0) return;
+  setReviewSyncStatus(status, tone);
+  if (refresh) void fetchJob({ force: true });
+}
+
 async function saveLine(mode = "save") {
-  if (!currentJob || selectedPosition === null) return;
+  if (!currentJob || selectedPosition === null || lineActionPending) return;
+  lineActionPending = true;
   const currentPosition = selectedPosition;
   const nextPosition = nextVisibleWorkflowPosition(currentJob, currentPosition);
   const priorLine = selectedLine(currentJob);
-  const translation = document.getElementById("workspace-translation")?.value || "";
-  lineDrafts.set(lineKey(selectedPosition), translation);
-  const response = await fetch(`/api/jobs/${jobId}/lines/${selectedPosition}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: translation, resolution_mode: mode }),
-  });
-  if (!response.ok) {
-    alert("Could not update subtitle line.");
+  const editorValue = document.getElementById("workspace-translation")?.value || "";
+  const translation = mode === "remove" ? "" : editorValue;
+  lineDrafts.set(lineKey(currentPosition), translation);
+  const actionButton = document.getElementById("workspace-save");
+  pauseReviewPollingForMutation(mode === "remove" ? "Removing subtitle…" : "Saving line…");
+  if (actionButton) {
+    actionButton.disabled = true;
+    actionButton.setAttribute("aria-busy", "true");
+  }
+  for (const button of [document.getElementById("workspace-remove"), document.getElementById("workspace-retranslate")]) {
+    if (button) button.disabled = true;
+  }
+  try {
+    const response = await fetch(`/api/jobs/${jobId}/lines/${currentPosition}?view=review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: translation, resolution_mode: mode }),
+    });
+    if (!response.ok) throw new Error("Could not update subtitle line.");
+    currentJob = await response.json();
+  } catch (error) {
+    if (mode === "remove") lineDrafts.set(lineKey(currentPosition), editorValue);
+    showReviewToast(error?.message || "Could not update subtitle line.", "error");
+    setReviewSyncStatus("Changes not saved", "error");
+    if (actionButton) {
+      actionButton.disabled = false;
+      actionButton.removeAttribute("aria-busy");
+    }
+    lineActionPending = false;
+    renderSide(currentJob);
+    finishReviewMutation({ refresh: false, status: "Changes not saved", tone: "error" });
     return;
   }
-  currentJob = await response.json();
-  lineDrafts.delete(lineKey(selectedPosition));
-  const updatedLine = selectedLine(currentJob);
+  lastReviewPayload = "";
+  lineActionPending = false;
+  finishReviewMutation();
+  lineDrafts.delete(lineKey(currentPosition));
+  const updatedLine = getLines(currentJob).find(line => line.position === currentPosition) || null;
   if (
     currentFilter === "suspect"
     && priorLine?.status === "suspect"
@@ -1187,70 +1460,106 @@ async function saveLine(mode = "save") {
   ) {
     transientSuspectResolved.add(updatedLine.position);
   }
-  if (nextPosition !== null && nextPosition !== currentPosition) {
+  if (selectedPosition === currentPosition && nextPosition !== null && nextPosition !== currentPosition) {
     selectedPosition = nextPosition;
   }
   renderAll();
   tableBody.querySelector(`[data-row-position="${selectedPosition}"]`)?.scrollIntoView({ block: "nearest" });
 }
 
+async function confirmRemoveSelectedSubtitle() {
+  if (!currentJob || selectedPosition === null || lineActionPending) return;
+  const position = selectedPosition;
+  const line = getLines(currentJob).find(item => item.position === position) || null;
+  const confirmed = await requestReviewConfirmation({
+    title: `Remove subtitle line ${position + 1}?`,
+    message: `The translated subtitle text will be cleared from this line. The source timing and source text remain available so you can restore or retranslate it later.${line?.translated_text ? "" : " This line is already empty."}`,
+    confirmLabel: "Remove Subtitle",
+  });
+  if (!confirmed || selectedPosition !== position) return;
+  await saveLine("remove");
+}
+
 async function saveLineAt(position, text, mode = "save") {
   if (!currentJob) return false;
   const priorLine = getLines(currentJob).find(line => line.position === position) || null;
-  const response = await fetch(`/api/jobs/${jobId}/lines/${position}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, resolution_mode: mode }),
-  });
-  if (!response.ok) {
+  let mutationSucceeded = false;
+  pauseReviewPollingForMutation("Saving selected lines…");
+  try {
+    const response = await fetch(`/api/jobs/${jobId}/lines/${position}?view=review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, resolution_mode: mode }),
+    });
+    if (!response.ok) throw new Error(`Could not update line ${position + 1}.`);
+    currentJob = await response.json();
+    lastReviewPayload = "";
+    lineDrafts.delete(lineKey(position));
+    const updatedLine = getLines(currentJob).find(line => line.position === position) || null;
+    if (
+      currentFilter === "suspect"
+      && priorLine?.status === "suspect"
+      && updatedLine
+      && ["auto_fixed", "manual_fixed"].includes(updatedLine.status)
+    ) {
+      transientSuspectResolved.add(updatedLine.position);
+    }
+    mutationSucceeded = true;
+    return true;
+  } catch (error) {
+    showReviewToast(error?.message || `Could not update line ${position + 1}.`, "error");
     return false;
+  } finally {
+    finishReviewMutation({
+      refresh: false,
+      status: mutationSucceeded ? "Live" : "Changes not saved",
+      tone: mutationSucceeded ? "live" : "error",
+    });
   }
-  currentJob = await response.json();
-  lineDrafts.delete(lineKey(position));
-  const updatedLine = getLines(currentJob).find(line => line.position === position) || null;
-  if (
-    currentFilter === "suspect"
-    && priorLine?.status === "suspect"
-    && updatedLine
-    && ["auto_fixed", "manual_fixed"].includes(updatedLine.status)
-  ) {
-    transientSuspectResolved.add(updatedLine.position);
-  }
-  return true;
 }
 
 async function retranslateLineAt(position, instruction = "") {
   if (!currentJob || position === null || position === undefined) return false;
   const nextPosition = nextVisibleWorkflowPosition(currentJob, position);
   const priorLine = getLines(currentJob).find(line => line.position === position) || null;
+  let mutationSucceeded = false;
   instructionDrafts.set(lineKey(position), instruction);
-  const response = await fetch(`/api/jobs/${jobId}/lines/${position}/retranslate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ extra_instruction: instruction }),
-  });
-  if (!response.ok) {
-    alert("Could not retranslate subtitle line.");
+  pauseReviewPollingForMutation("Retranslating line…");
+  try {
+    const response = await fetch(`/api/jobs/${jobId}/lines/${position}/retranslate?view=review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ extra_instruction: instruction }),
+    });
+    if (!response.ok) throw new Error("Could not retranslate subtitle line.");
+    const data = await response.json();
+    currentJob = data.job;
+    lastReviewPayload = "";
+    instructionDrafts.delete(lineKey(position));
+    const updatedLine = getLines(currentJob).find(line => line.position === position) || null;
+    if (
+      currentFilter === "suspect"
+      && priorLine?.status === "suspect"
+      && updatedLine
+      && ["auto_fixed", "manual_fixed"].includes(updatedLine.status)
+    ) {
+      transientSuspectResolved.add(updatedLine.position);
+    }
+    if (selectedPosition === position && nextPosition !== null && nextPosition !== position) selectedPosition = nextPosition;
+    renderAll();
+    tableBody.querySelector(`[data-row-position="${selectedPosition}"]`)?.scrollIntoView({ block: "nearest" });
+    mutationSucceeded = true;
+    return true;
+  } catch (error) {
+    showReviewToast(error?.message || "Could not retranslate subtitle line.", "error");
     return false;
+  } finally {
+    finishReviewMutation({
+      refresh: false,
+      status: mutationSucceeded ? "Live" : "Retranslation failed",
+      tone: mutationSucceeded ? "live" : "error",
+    });
   }
-  const data = await response.json();
-  currentJob = data.job;
-  instructionDrafts.delete(lineKey(position));
-  const updatedLine = getLines(currentJob).find(line => line.position === position) || null;
-  if (
-    currentFilter === "suspect"
-    && priorLine?.status === "suspect"
-    && updatedLine
-    && ["auto_fixed", "manual_fixed"].includes(updatedLine.status)
-  ) {
-    transientSuspectResolved.add(updatedLine.position);
-  }
-  if (nextPosition !== null && nextPosition !== position) {
-    selectedPosition = nextPosition;
-  }
-  renderAll();
-  tableBody.querySelector(`[data-row-position="${selectedPosition}"]`)?.scrollIntoView({ block: "nearest" });
-  return true;
 }
 
 function selectedVisiblePositions(job = currentJob) {
@@ -1267,17 +1576,21 @@ async function bulkResolveSelected() {
     button.disabled = true;
     button.textContent = "Resolving...";
   }
+  bulkActionPending = true;
+  pauseReviewPollingForMutation("Resolving selected lines…");
   try {
     for (const position of positions) {
       const line = getLines(currentJob).find(item => item.position === position);
       const text = lineDrafts.get(lineKey(position)) ?? line?.translated_text ?? "";
       const ok = await saveLineAt(position, text, "resolve");
       if (!ok) {
-        alert(`Could not resolve line ${position + 1}.`);
+        showReviewToast(`Stopped at line ${position + 1}; earlier successful changes were kept.`, "error");
         break;
       }
     }
   } finally {
+    bulkActionPending = false;
+    finishReviewMutation();
     if (button) {
       button.textContent = "Resolve Selected";
     }
@@ -1286,23 +1599,32 @@ async function bulkResolveSelected() {
 }
 
 async function bulkRetranslateSelected(extraInstruction = "") {
-  const positions = selectedVisiblePositions(currentJob);
+  const selected = selectedVisiblePositions(currentJob);
+  const sourcePositions = new Set(getLines(currentJob).filter(line => line.has_source).map(line => line.position));
+  const positions = selected.filter(position => sourcePositions.has(position));
   if (!positions.length) return;
+  if (positions.length < selected.length) {
+    showReviewToast(`${selected.length - positions.length} extra-output cue(s) skipped because they have no source line.`, "warning");
+  }
   const button = document.getElementById("workspace-bulk-retranslate");
   const instruction = extraInstruction;
   if (button) {
     button.disabled = true;
     button.textContent = "Retranslating...";
   }
+  bulkActionPending = true;
+  pauseReviewPollingForMutation("Retranslating selected lines…");
   try {
     for (const position of positions) {
       const ok = await retranslateLineAt(position, instruction);
       if (!ok) {
-        alert(`Could not retranslate line ${position + 1}.`);
+        showReviewToast(`Stopped at line ${position + 1}; earlier successful retranslations were kept.`, "error");
         break;
       }
     }
   } finally {
+    bulkActionPending = false;
+    finishReviewMutation();
     if (button) {
       button.textContent = "Retranslate Selected";
     }
@@ -1311,13 +1633,34 @@ async function bulkRetranslateSelected(extraInstruction = "") {
 }
 
 function clearSelectedRows() {
+  if (reviewActionBusy()) return;
   selectedPositions.clear();
   selectionAnchorPosition = null;
-  renderAll();
+  syncRenderedSelection(selectedPosition);
+}
+
+function syncRenderedSelection(focusPosition = null) {
+  for (const row of tableBody.querySelectorAll("[data-row-position]")) {
+    const position = Number(row.dataset.rowPosition);
+    const current = position === selectedPosition;
+    const marked = selectedPositions.has(position);
+    row.classList.toggle("is-selected", current);
+    row.classList.toggle("is-marked", marked);
+    row.tabIndex = current ? 0 : -1;
+    row.setAttribute("aria-selected", String(current || marked));
+  }
+  renderSide(currentJob);
+  if (sideBody) sideBody.scrollTop = 0;
+  scheduleReviewUiSave();
+  requestAnimationFrame(() => {
+    if (focusPosition === null) return;
+    tableBody.querySelector(`[data-row-position="${focusPosition}"]`)?.focus({ preventScroll: true });
+  });
 }
 
 function applyRowSelection(position, event) {
-  const rows = filteredLines(currentJob).map(line => line.position);
+  if (reviewActionBusy()) return;
+  const rows = [...tableBody.querySelectorAll("[data-row-position]")].map(row => Number(row.dataset.rowPosition));
   const isToggle = event.metaKey || event.ctrlKey;
   const isRange = event.shiftKey;
 
@@ -1350,13 +1693,61 @@ function applyRowSelection(position, event) {
   }
 
   selectedPosition = position;
+  syncRenderedSelection(position);
+  requestAnimationFrame(() => {
+    const selectedRow = tableBody.querySelector(`[data-row-position="${position}"]`);
+    if (window.matchMedia("(max-width: 960px)").matches && event.type === "click") {
+      sidePanel?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  });
+}
+
+function jumpToLine(rawLine) {
+  if (!currentJob) return;
+  const lineNumber = Number(rawLine);
+  const position = Math.trunc(lineNumber) - 1;
+  const exists = getLines(currentJob).some(line => Number(line.position) === position);
+  if (!Number.isFinite(position) || position < 0 || !exists) {
+    showReviewToast(`Line ${rawLine || "?"} is outside this subtitle.`, "error");
+    jumpLineEl?.focus();
+    return;
+  }
+  if (currentFilter !== "all" || currentSearch) {
+    currentFilter = "all";
+    currentSearch = "";
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("filter");
+    window.history.replaceState(null, "", nextUrl);
+    if (searchEl) searchEl.value = "";
+    showReviewToast("Cleared the current filter to reveal that line.");
+  }
+  selectedPosition = position;
+  selectedPositions.clear();
+  selectedPositions.add(position);
+  selectionAnchorPosition = position;
   renderAll();
+  requestAnimationFrame(() => {
+    const row = tableBody.querySelector(`[data-row-position="${position}"]`);
+    row?.scrollIntoView({ block: "center", behavior: "smooth" });
+    row?.focus({ preventScroll: true });
+  });
 }
 
 async function retranslateLine() {
-  if (!currentJob || selectedPosition === null) return;
+  if (!currentJob || selectedPosition === null || lineActionPending) return;
+  if (!selectedLine(currentJob)?.has_source) {
+    showReviewToast("This extra output has no source cue to retranslate. Edit or remove it instead.", "warning");
+    return;
+  }
   const instruction = document.getElementById("workspace-instruction")?.value || "";
-  await retranslateLineAt(selectedPosition, instruction);
+  lineActionPending = true;
+  renderSide(currentJob);
+  try {
+    await retranslateLineAt(selectedPosition, instruction);
+  } finally {
+    lineActionPending = false;
+    renderSide(currentJob);
+  }
 }
 
 function snapshotDraftKey(batchIndex) {
@@ -1364,7 +1755,7 @@ function snapshotDraftKey(batchIndex) {
 }
 
 function renderSnapshotDialog(job, batchIndex) {
-  const batch = deriveBatchInfo(job, batchIndex);
+  const batch = loadedBatchSnapshots.get(Number(batchIndex)) || deriveBatchInfo(job, batchIndex);
   snapshotTitle.textContent = `Batch ${batchIndex} Card`;
   if (!batch) {
     snapshotBody.innerHTML = `<p class="job-meta">No batch data available.</p>`;
@@ -1373,7 +1764,7 @@ function renderSnapshotDialog(job, batchIndex) {
     return;
   }
   const draftKey = snapshotDraftKey(batchIndex);
-  const currentDraft = contextDrafts.get(draftKey) || normalizeContextInput(batch.input_context || job.session_context || {});
+  const currentDraft = contextDrafts.get(draftKey) || normalizeContextInput(batch.input_context || batch.session_context || job.session_context || {});
   snapshotBody.innerHTML = renderContextEditor("workspace-snapshot", currentDraft, `
     <div class="snapshot-meta-row">
       <span class="job-fact">Batch ${escapeHtml(String(batchIndex))}</span>
@@ -1387,42 +1778,112 @@ function renderSnapshotDialog(job, batchIndex) {
       </div>
     </section>
   `);
-  saveSnapshotBtn.disabled = false;
-  generateSnapshotBtn.disabled = false;
+  const operationPending = batchCardOperationToken !== 0;
+  saveSnapshotBtn.disabled = operationPending;
+  generateSnapshotBtn.disabled = operationPending;
+}
+
+async function openSelectedBatchCard() {
+  const line = selectedLine(currentJob);
+  if (!currentJob || !line || !line.has_source || batchCardOperationToken !== 0) return;
+  const batchIndex = line.batch_index;
+  openBatchIndex = batchIndex;
+  snapshotTitle.textContent = `Batch ${batchIndex} Card`;
+  snapshotBody.innerHTML = `<p class="job-meta">Loading this Batch Card…</p>`;
+  saveSnapshotBtn.disabled = true;
+  generateSnapshotBtn.disabled = true;
+  if (!snapshotDialog.open) snapshotDialog.showModal();
+  saveReviewUiState();
+  try {
+    const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/batch-context/${batchIndex}`);
+    if (!response.ok) throw new Error("Could not load this Batch Card.");
+    const batch = await response.json();
+    if (openBatchIndex !== batchIndex || !snapshotDialog.open) return;
+    loadedBatchSnapshots.set(Number(batchIndex), batch);
+    renderSnapshotDialog(currentJob, batchIndex);
+  } catch (error) {
+    if (openBatchIndex !== batchIndex || !snapshotDialog.open) return;
+    snapshotBody.innerHTML = `<p class="job-meta">${escapeHtml(error?.message || "Could not load this Batch Card.")} Close this panel and try again.</p>`;
+    showReviewToast(error?.message || "Could not load this Batch Card.", "error");
+  }
 }
 
 async function saveBatchCard() {
-  if (!currentJob || openBatchIndex === null) return;
+  if (!currentJob || openBatchIndex === null || batchCardOperationToken !== 0) return;
+  const batchIndex = openBatchIndex;
+  const operationToken = Date.now() + Math.random();
+  batchCardOperationToken = operationToken;
   const payload = normalizeContextInput(readContextEditor("workspace-snapshot", snapshotBody));
-  const response = await fetch(`/api/jobs/${jobId}/batch-context/${openBatchIndex}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_context: payload }),
-  });
-  if (!response.ok) {
-    alert("Could not update batch card.");
+  pauseReviewPollingForMutation("Saving Batch Card…");
+  saveSnapshotBtn.disabled = true;
+  generateSnapshotBtn.disabled = true;
+  saveSnapshotBtn.setAttribute("aria-busy", "true");
+  let response;
+  try {
+    response = await fetch(`/api/jobs/${jobId}/batch-context/${batchIndex}?view=review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_context: payload }),
+    });
+    if (!response.ok) throw new Error("Could not update Batch Card.");
+    currentJob = await response.json();
+    const loadedBatch = loadedBatchSnapshots.get(Number(batchIndex));
+    loadedBatchSnapshots.set(Number(batchIndex), {
+      ...(loadedBatch || deriveBatchInfo(currentJob, batchIndex) || {}),
+      input_context: payload,
+      has_snapshot: true,
+    });
+  } catch (error) {
+    showReviewToast(error?.message || "Could not update Batch Card.", "error");
+    finishReviewMutation({ refresh: false, status: "Batch Card not saved", tone: "error" });
+    if (batchCardOperationToken === operationToken) batchCardOperationToken = 0;
+    saveSnapshotBtn.disabled = false;
+    generateSnapshotBtn.disabled = false;
+    saveSnapshotBtn.removeAttribute("aria-busy");
     return;
   }
-  currentJob = await response.json();
-  contextDrafts.delete(snapshotDraftKey(openBatchIndex));
-  renderSnapshotDialog(currentJob, openBatchIndex);
+  lastReviewPayload = "";
+  contextDrafts.delete(snapshotDraftKey(batchIndex));
+  if (batchCardOperationToken === operationToken) batchCardOperationToken = 0;
+  if (openBatchIndex === batchIndex && snapshotDialog.open) renderSnapshotDialog(currentJob, batchIndex);
   renderAll();
+  finishReviewMutation();
+  saveSnapshotBtn.removeAttribute("aria-busy");
+  showReviewToast("Batch Card saved.", "success");
 }
 
 async function generateBatchCard() {
-  if (!currentJob || openBatchIndex === null) return;
+  if (!currentJob || openBatchIndex === null || batchCardOperationToken !== 0) return;
+  const batchIndex = openBatchIndex;
+  const operationToken = Date.now() + Math.random();
+  batchCardOperationToken = operationToken;
+  pauseReviewPollingForMutation("Generating Batch Card…");
   generateSnapshotBtn.disabled = true;
-  generateSnapshotBtn.textContent = "Generating...";
-  const response = await fetch(`/api/jobs/${jobId}/batch-context/${openBatchIndex}/generate`, { method: "POST" });
-  generateSnapshotBtn.disabled = false;
-  generateSnapshotBtn.textContent = "Generate Card";
-  if (!response.ok) {
-    alert("Could not generate batch card.");
+  saveSnapshotBtn.disabled = true;
+  generateSnapshotBtn.setAttribute("aria-busy", "true");
+  generateSnapshotBtn.textContent = "Generating…";
+  let response;
+  try {
+    response = await fetch(`/api/jobs/${jobId}/batch-context/${batchIndex}/generate`, { method: "POST" });
+    if (!response.ok) throw new Error("Could not generate Batch Card.");
+    const data = await response.json();
+    contextDrafts.set(snapshotDraftKey(batchIndex), normalizeContextInput(data.session_context));
+  } catch (error) {
+    showReviewToast(error?.message || "Could not generate Batch Card.", "error");
+    finishReviewMutation({ refresh: false, status: "Batch Card generation failed", tone: "error" });
+    if (batchCardOperationToken === operationToken) batchCardOperationToken = 0;
+    generateSnapshotBtn.disabled = false;
+    saveSnapshotBtn.disabled = false;
+    generateSnapshotBtn.removeAttribute("aria-busy");
+    generateSnapshotBtn.textContent = "Generate Card";
     return;
   }
-  const data = await response.json();
-  contextDrafts.set(snapshotDraftKey(openBatchIndex), normalizeContextInput(data.session_context));
-  renderSnapshotDialog(currentJob, openBatchIndex);
+  if (batchCardOperationToken === operationToken) batchCardOperationToken = 0;
+  if (openBatchIndex === batchIndex && snapshotDialog.open) renderSnapshotDialog(currentJob, batchIndex);
+  finishReviewMutation();
+  generateSnapshotBtn.removeAttribute("aria-busy");
+  generateSnapshotBtn.textContent = "Generate Card";
+  showReviewToast("Generated a new Batch Card draft. Review it, then save when ready.", "success");
 }
 
 function flaggedPositions() {
@@ -1455,7 +1916,7 @@ function jumpFlagged(direction) {
 function visibleFlaggedPositions(job = currentJob) {
   if (!job) return [];
   return filteredLines(job)
-    .filter(line => line.status === "suspect" || line.status === "error")
+    .filter(line => line.has_source && (line.status === "suspect" || line.status === "error"))
     .map(line => line.position);
 }
 
@@ -1469,7 +1930,7 @@ function nextVisibleWorkflowPosition(job, currentPosition) {
   if (currentIndex === -1) {
     return orderedRows[0]?.position ?? null;
   }
-  return orderedRows[(currentIndex + 1) % orderedRows.length]?.position ?? null;
+  return orderedRows[currentIndex + 1]?.position ?? null;
 }
 
 async function autoRewriteAllFlagged() {
@@ -1480,25 +1941,51 @@ async function autoRewriteAllFlagged() {
   }
   const queue = visibleFlaggedPositions(currentJob);
   if (!queue.length) return;
+  const skippedExtras = filteredLines(currentJob).filter(
+    line => !line.has_source && (line.status === "suspect" || line.status === "error"),
+  ).length;
+  const confirmed = await requestReviewConfirmation({
+    title: `Retranslate ${queue.length} flagged line${queue.length === 1 ? "" : "s"}?`,
+    message: `Auto Rewrite will process the visible suspect and error lines one by one using the current filter and search. This may make several model calls; you can stop after it begins.${skippedExtras ? ` ${skippedExtras} extra-output cue(s) without a source line will be left for manual review.` : ""}`,
+    confirmLabel: "Start Auto Rewrite",
+    tone: "warning",
+  });
+  if (!confirmed) return;
   autoRewritePending = true;
   autoRewriteAbort = false;
+  autoRewriteProgress = { current: 0, total: queue.length, succeeded: 0 };
+  pauseReviewPollingForMutation("Auto Rewrite in progress…");
   renderAll();
   try {
-    for (const position of queue) {
+    for (let index = 0; index < queue.length; index += 1) {
+      const position = queue[index];
       if (autoRewriteAbort) break;
       const stillFlagged = visibleFlaggedPositions(currentJob).includes(position);
       if (!stillFlagged) continue;
+      autoRewriteProgress.current = index + 1;
       selectedPosition = position;
+      setReviewSyncStatus(`Auto Rewrite ${autoRewriteProgress.current}/${autoRewriteProgress.total}`, "syncing");
       renderAll();
       const row = tableBody.querySelector(`[data-row-position="${selectedPosition}"]`);
       row?.scrollIntoView({ block: "nearest" });
       const ok = await retranslateLineAt(position, "");
       if (!ok) break;
+      autoRewriteProgress.succeeded += 1;
     }
   } finally {
+    const stopped = autoRewriteAbort;
+    const { succeeded = 0, total = queue.length } = autoRewriteProgress || {};
     autoRewritePending = false;
     autoRewriteAbort = false;
+    autoRewriteProgress = null;
+    finishReviewMutation();
     renderAll();
+    showReviewToast(
+      stopped
+        ? `Auto Rewrite stopped after ${succeeded} of ${total} line${total === 1 ? "" : "s"}.`
+        : `Auto Rewrite finished: ${succeeded} of ${total} line${total === 1 ? "" : "s"} updated.`,
+      stopped || succeeded < total ? "warning" : "success",
+    );
   }
 }
 
@@ -1506,6 +1993,10 @@ function removeContextRow(scope, button) {
   const row = button.closest("[data-editor-row]");
   if (!row) return;
   row.remove();
+  if (openBatchIndex !== null) {
+    contextDrafts.set(snapshotDraftKey(openBatchIndex), normalizeContextInput(readContextEditor(scope, snapshotBody)));
+    scheduleReviewUiSave();
+  }
   syncContextPreview(scope, snapshotBody);
 }
 
@@ -1529,6 +2020,10 @@ document.addEventListener("click", (event) => {
       clearTransientSuspectResolved();
     }
     currentFilter = nextFilter;
+    const nextUrl = new URL(window.location.href);
+    if (nextFilter === "all") nextUrl.searchParams.delete("filter");
+    else nextUrl.searchParams.set("filter", nextFilter);
+    window.history.replaceState(null, "", nextUrl);
     renderAll();
     if (previousSelectedPosition !== null) {
       const previousRow = tableBody.querySelector(`[data-row-position="${previousSelectedPosition}"]`);
@@ -1538,6 +2033,10 @@ document.addEventListener("click", (event) => {
   }
   const row = event.target.closest("[data-row-position]");
   if (row) {
+    const selection = window.getSelection();
+    if (selection && String(selection.toString() || "").trim() && row.contains(selection.anchorNode) && row.contains(selection.focusNode)) {
+      return;
+    }
     applyRowSelection(Number(row.dataset.rowPosition), event);
     return;
   }
@@ -1552,13 +2051,13 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (event.target.id === "workspace-save") {
-    void saveLine(event.target.dataset.mode || "save");
+    const mode = event.target.dataset.mode || "save";
+    if (mode === "remove") void confirmRemoveSelectedSubtitle();
+    else void saveLine(mode);
     return;
   }
   if (event.target.id === "workspace-remove") {
-    const field = document.getElementById("workspace-translation");
-    if (field) field.value = "";
-    void saveLine("remove");
+    void confirmRemoveSelectedSubtitle();
     return;
   }
   if (event.target.id === "workspace-retranslate") {
@@ -1579,26 +2078,48 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (event.target.id === "workspace-batch-card") {
-    const line = selectedLine(currentJob);
-    if (!line) return;
-    openBatchIndex = line.batch_index;
-    renderSnapshotDialog(currentJob, openBatchIndex);
-    snapshotDialog.showModal();
-    saveReviewUiState();
+    void openSelectedBatchCard();
+    return;
+  }
+  if (event.target.closest("[data-review-return-list]")) {
+    const row = selectedPosition === null ? null : tableBody.querySelector(`[data-row-position="${selectedPosition}"]`);
+    row?.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.setTimeout(() => row?.focus({ preventScroll: true }), 220);
   }
 });
 
 document.addEventListener("change", (event) => {
   const toggle = event.target.closest("[data-column-visible]");
-  if (!toggle) return;
-  const key = toggle.dataset.columnVisible;
-  const column = reviewColumnState.find(item => item.key === key);
-  if (!column) return;
-  if (!toggle.checked && visibleReviewColumns().length <= 1) {
-    toggle.checked = true;
+  if (toggle) {
+    const key = toggle.dataset.columnVisible;
+    const column = reviewColumnState.find(item => item.key === key);
+    if (!column) return;
+    if (!toggle.checked && visibleReviewColumns().length <= 1) {
+      toggle.checked = true;
+      return;
+    }
+    column.visible = Boolean(toggle.checked);
+    saveReviewColumnState();
+    if (currentJob) renderTable(currentJob);
     return;
   }
-  column.visible = Boolean(toggle.checked);
+  const widthInput = event.target.closest("[data-column-width]");
+  if (!widthInput) return;
+  const column = reviewColumnState.find(item => item.key === widthInput.dataset.columnWidth);
+  if (!column) return;
+  column.width = Math.max(48, Math.min(720, Number(widthInput.value) || column.width));
+  saveReviewColumnState();
+  if (currentJob) renderTable(currentJob);
+});
+
+document.addEventListener("click", (event) => {
+  const moveButton = event.target.closest("[data-column-move][data-column-key]");
+  if (!moveButton) return;
+  const index = reviewColumnState.findIndex(item => item.key === moveButton.dataset.columnKey);
+  const offset = moveButton.dataset.columnMove === "left" ? -1 : 1;
+  const nextIndex = index + offset;
+  if (index < 0 || nextIndex < 0 || nextIndex >= reviewColumnState.length) return;
+  [reviewColumnState[index], reviewColumnState[nextIndex]] = [reviewColumnState[nextIndex], reviewColumnState[index]];
   saveReviewColumnState();
   if (currentJob) renderTable(currentJob);
 });
@@ -1669,6 +2190,29 @@ window.addEventListener("pointerup", () => {
   saveReviewColumnState();
 });
 
+function cancelColumnResize() {
+  if (!resizingColumn) return;
+  resizingColumn = null;
+  document.body.classList.remove("is-resizing-review-column");
+  saveReviewColumnState();
+}
+
+window.addEventListener("pointercancel", cancelColumnResize);
+window.addEventListener("blur", cancelColumnResize);
+
+document.addEventListener("keydown", (event) => {
+  const handle = event.target instanceof Element ? event.target.closest("[data-column-resize]") : null;
+  if (!handle || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  const column = reviewColumnState.find(item => item.key === handle.dataset.columnResize);
+  if (!column) return;
+  event.preventDefault();
+  const direction = event.key === "ArrowLeft" ? -1 : 1;
+  column.width = Math.max(48, Math.min(720, column.width + direction * (event.shiftKey ? 32 : 8)));
+  saveReviewColumnState();
+  if (currentJob) renderTable(currentJob);
+  requestAnimationFrame(() => tableHeader?.querySelector(`[data-column-resize="${CSS.escape(column.key)}"]`)?.focus());
+});
+
 document.addEventListener("input", (event) => {
   if (event.target.id === "workspace-translation" && selectedPosition !== null) {
     lineDrafts.set(lineKey(selectedPosition), event.target.value);
@@ -1680,34 +2224,37 @@ document.addEventListener("input", (event) => {
     }
     const preview = document.getElementById("workspace-translation-preview");
     if (preview) preview.innerHTML = event.target.value ? renderSubtitlePreview(event.target.value) : "";
+    scheduleReviewUiSave();
     return;
   }
   if (event.target.id === "workspace-instruction" && selectedPosition !== null) {
     instructionDrafts.set(lineKey(selectedPosition), event.target.value);
+    scheduleReviewUiSave();
     return;
   }
   if (snapshotDialog.open && event.target.closest("[data-context-field], [data-context-character], [data-context-glossary]")) {
     contextDrafts.set(snapshotDraftKey(openBatchIndex), normalizeContextInput(readContextEditor("workspace-snapshot", snapshotBody)));
     syncContextPreview("workspace-snapshot", snapshotBody);
+    scheduleReviewUiSave();
   }
 });
 
 searchEl.addEventListener("input", () => {
   currentSearch = searchEl.value || "";
   renderAll();
+  scheduleReviewUiSave();
 });
-refreshBtn.addEventListener("click", () => void fetchJob());
+refreshBtn.addEventListener("click", () => void fetchJob({ force: true }));
 prevFlaggedBtn.addEventListener("click", () => jumpFlagged(-1));
 nextFlaggedBtn.addEventListener("click", () => jumpFlagged(1));
 autoRewriteNextBtn?.addEventListener("click", () => void autoRewriteAllFlagged());
 saveSnapshotBtn.addEventListener("click", () => void saveBatchCard());
 generateSnapshotBtn.addEventListener("click", () => void generateBatchCard());
 snapshotDialog.addEventListener("close", () => {
-  if (openBatchIndex !== null) {
-    contextDrafts.delete(snapshotDraftKey(openBatchIndex));
-  }
+  const preservedDraft = openBatchIndex !== null && contextDrafts.has(snapshotDraftKey(openBatchIndex));
   openBatchIndex = null;
   saveReviewUiState();
+  if (preservedDraft) showReviewToast("Unsaved Batch Card draft preserved. Reopen the card to continue editing.");
 });
 snapshotDialog.addEventListener("click", (event) => {
   if (event.target === snapshotDialog && snapshotDialog.open) {
@@ -1719,7 +2266,111 @@ window.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
 window.addEventListener("pagehide", saveReviewScrollState, { passive: true });
 window.addEventListener("beforeunload", saveReviewScrollState, { passive: true });
 reviewScrollContainer()?.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
+sideBody?.addEventListener("scroll", scheduleReviewScrollSave, { passive: true });
 document.addEventListener("change", scheduleReviewUiSave, true);
 
+document.addEventListener("toggle", (event) => {
+  const rawEditor = event.target.closest?.("[data-raw-editor-position]");
+  if (!rawEditor) return;
+  const position = Number(rawEditor.dataset.rawEditorPosition);
+  if (!Number.isFinite(position)) return;
+  if (rawEditor.open) rawEditorOpenPositions.add(position);
+  else rawEditorOpenPositions.delete(position);
+  scheduleReviewUiSave();
+}, true);
+
+for (const button of densityButtons) {
+  button.addEventListener("click", () => {
+    reviewDensity = button.dataset.reviewDensity === "compact" ? "compact" : "comfortable";
+    applyReviewDensity();
+    scheduleReviewUiSave();
+  });
+}
+
+jumpLineEl?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  jumpToLine(jumpLineEl.value);
+});
+
+document.addEventListener("keydown", (event) => {
+  const target = event.target;
+  const isTyping = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+  if (reviewConfirmDialog?.open) return;
+  if (event.key === "/" && !isTyping && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    searchEl.focus();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && snapshotDialog.open) {
+    event.preventDefault();
+    saveSnapshotBtn?.click();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && document.getElementById("workspace-save")) {
+    event.preventDefault();
+    document.getElementById("workspace-save")?.click();
+    return;
+  }
+  const row = target instanceof Element ? target.closest("[data-row-position]") : null;
+  if (!row || !["ArrowUp", "ArrowDown", "Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  const positions = filteredLines(currentJob).map(line => line.position);
+  const current = Number(row.dataset.rowPosition);
+  if (event.key === "Enter" || event.key === " ") {
+    applyRowSelection(current, event);
+    return;
+  }
+  const currentIndex = positions.indexOf(current);
+  const nextIndex = Math.max(0, Math.min(positions.length - 1, currentIndex + (event.key === "ArrowDown" ? 1 : -1)));
+  const next = positions[nextIndex];
+  if (Number.isFinite(next)) {
+    applyRowSelection(next, event);
+    requestAnimationFrame(() => tableBody.querySelector(`[data-row-position="${next}"]`)?.scrollIntoView({ block: "nearest" }));
+  }
+});
+
+snapshotDialog.querySelector("form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+snapshotDialog.querySelector("[data-dialog-close]")?.addEventListener("click", () => snapshotDialog.close("cancel"));
+reviewConfirmSubmit?.addEventListener("click", () => settleReviewConfirmation(true));
+reviewConfirmCancel?.addEventListener("click", () => settleReviewConfirmation(false));
+reviewConfirmDialog?.addEventListener("click", event => {
+  if (event.target === reviewConfirmDialog && reviewConfirmDialog.open) settleReviewConfirmation(false);
+});
+reviewConfirmDialog?.addEventListener("cancel", event => {
+  event.preventDefault();
+  settleReviewConfirmation(false);
+});
+reviewConfirmDialog?.addEventListener("close", () => {
+  if (!pendingReviewConfirmationResolve) return;
+  const resolve = pendingReviewConfirmationResolve;
+  pendingReviewConfirmationResolve = null;
+  resolve(reviewConfirmDialog.returnValue === "confirm");
+});
+
+window.addEventListener("pagehide", saveReviewUiState, { passive: true });
+window.addEventListener("beforeunload", saveReviewUiState, { passive: true });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    reviewFetchController?.abort();
+    setReviewSyncStatus("Paused in background", "paused");
+  } else {
+    void fetchJob({ force: true });
+  }
+});
+document.addEventListener("focusout", () => {
+  if (!pendingReviewRender) return;
+  window.setTimeout(() => {
+    if (!pendingReviewRender || reviewHasActiveEditor() || reviewMutationDepth > 0) return;
+    applyFetchedReviewJob();
+    setReviewSyncStatus("Live", "live");
+  }, 0);
+});
+
+applyReviewDensity();
 void fetchJob();
-setInterval(fetchJob, 2500);
+setInterval(() => {
+  if (!document.hidden) void fetchJob();
+}, 2500);

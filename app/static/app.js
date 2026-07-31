@@ -12,6 +12,17 @@ const form = document.getElementById("job-form");
 const jobsEl = document.getElementById("jobs");
 const refreshBtn = document.getElementById("refresh-btn");
 const clearFinishedBtn = document.getElementById("clear-finished-btn");
+const jobsSearchEl = document.getElementById("jobs-search");
+const jobsFilterButtons = [...document.querySelectorAll("[data-jobs-filter]")];
+const jobsResultSummaryEl = document.getElementById("jobs-result-summary");
+const jobsSyncStatusEl = document.getElementById("jobs-sync-status");
+const jobsEvidenceToggle = document.getElementById("jobs-evidence-toggle");
+const consoleToastEl = document.getElementById("console-toast");
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmDialogTitle = document.getElementById("confirm-dialog-title");
+const confirmDialogMessage = document.getElementById("confirm-dialog-message");
+const confirmDialogCancel = document.getElementById("confirm-dialog-cancel");
+const confirmDialogSubmit = document.getElementById("confirm-dialog-submit");
 const activeJobCard = document.getElementById("active-job-card");
 const dialog = document.getElementById("context-dialog");
 const contextDialogTitle = document.getElementById("context-dialog-title");
@@ -80,6 +91,12 @@ const formReloadStatus = document.getElementById("form-reload-status");
 const consoleTabButtons = [...document.querySelectorAll("[data-console-tab]")];
 const consoleTabPanels = [...document.querySelectorAll("[data-console-panel]")];
 
+for (const helpDot of document.querySelectorAll(".info-dot[title]")) {
+  helpDot.tabIndex = 0;
+  helpDot.setAttribute("role", "note");
+  helpDot.setAttribute("aria-label", `Help: ${helpDot.title}`);
+}
+
 let editingJobId = null;
 let openLogJobId = null;
 let openReviewJobId = null;
@@ -113,8 +130,11 @@ const visionRailScrollState = new Map();
 const visionRailNavigationState = new WeakMap();
 const visionRailWheelState = new WeakMap();
 const seenVisionFrameIds = new Set();
+const jobCardRenderSignatures = new Map();
 const VIDEO_FILE_EXTENSIONS = new Set(["mp4", "mkv", "webm", "mov", "avi", "m4v", "ts"]);
 const jobsById = new Map();
+const fullJobsById = new Map();
+const reviewJobsById = new Map();
 let openVisionEvidenceJobId = null;
 let openVisionEvidenceFrameId = null;
 let consoleScrollRestorePending = true;
@@ -122,6 +142,60 @@ let consoleScrollSaveFrame = null;
 let consoleUiRestorePending = true;
 let consoleUiSaveFrame = null;
 let consoleScrollRestoreAttempts = 0;
+let currentJobs = [];
+let currentJobsFilter = "all";
+let currentJobsSearch = "";
+let lastJobsPayload = "";
+let jobsFetchSequence = 0;
+let jobsFetchController = null;
+let jobsFetchInFlight = false;
+let jobsConnectionFailed = false;
+let consoleToastTimer = null;
+let pendingConfirmationResolve = null;
+const pendingJobActions = new Set();
+
+function setJobsSyncStatus(message, tone = "live") {
+  if (!jobsSyncStatusEl) return;
+  jobsSyncStatusEl.textContent = message;
+  jobsSyncStatusEl.dataset.tone = tone;
+}
+
+function showConsoleToast(message, tone = "info") {
+  if (!consoleToastEl) return;
+  consoleToastEl.textContent = message;
+  consoleToastEl.dataset.tone = tone;
+  consoleToastEl.hidden = false;
+  if (consoleToastTimer !== null) window.clearTimeout(consoleToastTimer);
+  consoleToastTimer = window.setTimeout(() => {
+    consoleToastEl.hidden = true;
+    consoleToastTimer = null;
+  }, 5200);
+}
+
+function requestConfirmation({ title, message, confirmLabel = "Continue", tone = "danger" }) {
+  if (!confirmDialog || !confirmDialogTitle || !confirmDialogMessage || !confirmDialogSubmit) {
+    return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+  }
+  if (pendingConfirmationResolve) return Promise.resolve(false);
+  confirmDialogTitle.textContent = title;
+  confirmDialogMessage.textContent = message;
+  confirmDialogSubmit.textContent = confirmLabel;
+  confirmDialogSubmit.classList.toggle("danger", tone === "danger");
+  confirmDialogSubmit.classList.toggle("warn", tone === "warning");
+  confirmDialog.dataset.tone = tone;
+  confirmDialog.showModal();
+  requestAnimationFrame(() => confirmDialogCancel?.focus());
+  return new Promise(resolve => {
+    pendingConfirmationResolve = resolve;
+  });
+}
+
+function settleConfirmation(confirmed) {
+  const resolve = pendingConfirmationResolve;
+  pendingConfirmationResolve = null;
+  if (confirmDialog?.open) confirmDialog.close(confirmed ? "confirm" : "cancel");
+  resolve?.(confirmed);
+}
 
 function readModelCallStats() {
   const raw = localStorage.getItem(MODEL_CALL_STATS_KEY);
@@ -138,22 +212,8 @@ let modelCallStats = readModelCallStats();
 
 function organizeConsoleWorkflowLayout() {
   if (!form || form.classList.contains("workflow-columns-ready")) return;
-  const sourceSection = form.querySelector(".source-section");
-  const translationSection = form.querySelector(".translation-section");
-  const workspace = form.querySelector(".workspace-grid");
-  const modelSection = workspace?.querySelector(".model-section");
-  const controlsSection = workspace?.querySelector(".controls-section");
-  if (!sourceSection || !translationSection || !workspace || !modelSection || !controlsSection) return;
-
-  const sourceColumn = document.createElement("div");
-  sourceColumn.className = "workflow-column workflow-column-source";
-  const translationColumn = document.createElement("div");
-  translationColumn.className = "workflow-column workflow-column-translation";
-  form.insertBefore(sourceColumn, sourceSection);
-  form.insertBefore(translationColumn, sourceSection);
-  sourceColumn.append(sourceSection, modelSection);
-  translationColumn.append(translationSection, controlsSection);
-  workspace.remove();
+  // Keep the logical 1 → 2 → 3 DOM order for keyboard and screen-reader users.
+  // CSS grid places the four existing sections into the two-column workspace.
   form.classList.add("workflow-columns-ready");
 }
 
@@ -173,7 +233,11 @@ function readScrollState(storageKey) {
 }
 
 function writeScrollState(storageKey, state) {
-  sessionStorage.setItem(storageKey, JSON.stringify(state));
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(state));
+  } catch (_) {
+    // The app remains usable when private browsing or storage quotas block UI persistence.
+  }
 }
 
 function readSessionState(storageKey) {
@@ -188,7 +252,11 @@ function readSessionState(storageKey) {
 }
 
 function writeSessionState(storageKey, state) {
-  sessionStorage.setItem(storageKey, JSON.stringify(state));
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(state));
+  } catch (_) {
+    // Keep the live workflow usable even if browser UI-state persistence is unavailable.
+  }
 }
 
 function parseStoredNumber(value) {
@@ -271,6 +339,11 @@ function captureConsoleUiState() {
     openReviewFilter,
     openSnapshotJobId,
     openSnapshotBatchIndex,
+    currentJobsFilter,
+    currentJobsSearch,
+    collapsedJobAuxiliary: [...collapsedJobAuxiliary],
+    expandedActiveContext: [...expandedActiveContext],
+    expandedJobMoreActions: [...expandedJobMoreActions],
   };
 }
 
@@ -324,6 +397,17 @@ function restoreConsoleUiState() {
   openSnapshotJobId = state.openSnapshotJobId || null;
   openSnapshotBatchIndex = parseStoredPositiveNumber(state.openSnapshotBatchIndex);
   editingJobId = state.editingJobId || null;
+  currentJobsFilter = ["all", "active", "completed", "attention"].includes(state.currentJobsFilter)
+    ? state.currentJobsFilter
+    : "all";
+  currentJobsSearch = String(state.currentJobsSearch || "");
+  if (jobsSearchEl) jobsSearchEl.value = currentJobsSearch;
+  collapsedJobAuxiliary.clear();
+  for (const id of Array.isArray(state.collapsedJobAuxiliary) ? state.collapsedJobAuxiliary : []) collapsedJobAuxiliary.add(String(id));
+  expandedActiveContext.clear();
+  for (const id of Array.isArray(state.expandedActiveContext) ? state.expandedActiveContext : []) expandedActiveContext.add(String(id));
+  expandedJobMoreActions.clear();
+  for (const id of Array.isArray(state.expandedJobMoreActions) ? state.expandedJobMoreActions : []) expandedJobMoreActions.add(String(id));
 }
 
 function modelCallSignature(job) {
@@ -441,6 +525,7 @@ function refreshVisionRails(root = document) {
 function renderVisionTimeline(job, compact = false, location = "timeline") {
   const frames = Array.isArray(job?.visual_frames) ? job.visual_frames : [];
   if (!frames.length) return "";
+  const totalFrameCount = Math.max(frames.length, Number(job?.visual_frame_count || 0));
   const ordered = [...frames].sort((a, b) => {
     const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
     return timeDelta || Number(a.batch_index || 0) - Number(b.batch_index || 0);
@@ -454,7 +539,7 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
       <div class="vision-timeline-head">
         <div>
           <div class="mini-eyebrow">Visual Evidence</div>
-          <div class="job-meta">${escapeHtml(String(frames.length))} frame${frames.length === 1 ? "" : "s"} collected for scene guides and targeted evidence</div>
+          <div class="job-meta">${escapeHtml(String(totalFrameCount))} frame${totalFrameCount === 1 ? "" : "s"} collected for scene guides and targeted evidence</div>
         </div>
         <div class="vision-timeline-stats">
           <span title="Calls: number of batches that triggered one multimodal follow-up request with screenshots.">Calls ${escapeHtml(String(stats.clarification_requests || 0))}</span>
@@ -462,7 +547,7 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
           <span title="Approved: model-reported visual doubts that passed the app's category, line, question, and per-batch limit checks.">Approved ${escapeHtml(String(stats.doubts_approved || 0))}</span>
           <span title="Revised: subtitle lines whose provisional translation was changed after the model inspected the requested screenshots.">Revised ${escapeHtml(String(stats.lines_revised || 0))}</span>
           ${stats.clarification_failures ? `<span class="failed">Failed ${escapeHtml(String(stats.clarification_failures))}</span>` : ""}
-          ${frames.length > visible.length ? `<span class="vision-more">+${escapeHtml(String(frames.length - visible.length))} earlier</span>` : ""}
+          ${totalFrameCount > visible.length ? `<span class="vision-more">+${escapeHtml(String(totalFrameCount - visible.length))} earlier</span>` : ""}
           <button type="button" class="vision-rail-control" data-vision-scroll="-1" title="Previous evidence · repeated clicks accelerate" aria-label="Previous screenshots">‹</button>
           <button type="button" class="vision-rail-control" data-vision-scroll="1" title="Next evidence · repeated clicks accelerate" aria-label="Next screenshots">›</button>
         </div>
@@ -515,10 +600,30 @@ function renderVisionTimeline(job, compact = false, location = "timeline") {
   `;
 }
 
-function openVisionEvidence(jobId, frameId) {
-  const job = jobsById.get(jobId);
-  const frame = (job?.visual_frames || []).find(item => String(item.id) === String(frameId));
-  if (!job || !frame || !visionEvidenceDialog || !visionEvidenceDialogBody) return;
+async function openVisionEvidence(jobId, frameId) {
+  let job = fullJobsById.get(jobId);
+  if (!job) {
+    try {
+      job = await fetchFullJob(jobId);
+    } catch (_) {
+      setFormReloadStatus("Could not open visual evidence", "The full job record could not be loaded. Try Refresh and open the frame again.", "warn");
+      return;
+    }
+  }
+  let frame = (job?.visual_frames || []).find(item => String(item.id) === String(frameId));
+  if (job && !frame) {
+    try {
+      job = await fetchFullJob(jobId);
+      frame = (job?.visual_frames || []).find(item => String(item.id) === String(frameId));
+    } catch (_) {
+      setFormReloadStatus("Could not refresh visual evidence", "The frame list changed while the job was running. Try opening it again after the next refresh.", "warn");
+      return;
+    }
+  }
+  if (!job || !frame || !visionEvidenceDialog || !visionEvidenceDialogBody) {
+    showConsoleToast("That visual frame is no longer available.", "warning");
+    return;
+  }
   const details = Array.isArray(frame.details) ? frame.details : [];
   const isSceneFrame = frame.status === "scene"
     || (Array.isArray(frame.categories) && frame.categories.includes("scene_context"))
@@ -637,7 +742,7 @@ function openVisionEvidence(jobId, frameId) {
 }
 
 function navigateVisionEvidence(offset) {
-  const job = jobsById.get(openVisionEvidenceJobId);
+  const job = fullJobsById.get(openVisionEvidenceJobId) || jobsById.get(openVisionEvidenceJobId);
   if (!job || !openVisionEvidenceFrameId) return;
   const orderedFrames = [...(job.visual_frames || [])].sort((a, b) => {
     const timeDelta = Number(a.timestamp_ms || 0) - Number(b.timestamp_ms || 0);
@@ -645,7 +750,7 @@ function navigateVisionEvidence(offset) {
   });
   const currentIndex = orderedFrames.findIndex(item => String(item.id) === String(openVisionEvidenceFrameId));
   const target = orderedFrames[currentIndex + offset];
-  if (target) openVisionEvidence(job.id, target.id);
+  if (target) void openVisionEvidence(job.id, target.id);
 }
 
 function addModelCallDuration(job, seconds) {
@@ -663,13 +768,16 @@ function addModelCallDuration(job, seconds) {
 function learnModelCallDurations(job) {
   const logs = Array.isArray(job?.logs) ? job.logs : [];
   if (!logs.length) return;
-  const state = modelCallParserState.get(job.id) || { processed: 0, pendingByBatch: {} };
+  const state = modelCallParserState.get(job.id) || { seenKeys: [], pendingByBatch: {} };
   const pendingByBatch = state.pendingByBatch || {};
+  const seenKeys = new Set(Array.isArray(state.seenKeys) ? state.seenKeys : []);
   const startPattern = /Submitting batch to model|Retrying batch with stricter translation instruction|Starting batch /;
   const endPattern = /Validation after attempt|Model request timed out after/;
 
-  for (let index = state.processed; index < logs.length; index += 1) {
-    const entry = logs[index];
+  for (const entry of logs) {
+    const entryKey = `${entry?.timestamp || ""}|${entry?.batch_index ?? ""}|${entry?.message || ""}`;
+    if (seenKeys.has(entryKey)) continue;
+    seenKeys.add(entryKey);
     const batch = Number(entry?.batch_index);
     if (!Number.isFinite(batch) || batch <= 0) continue;
     const message = String(entry?.message || "");
@@ -695,7 +803,7 @@ function learnModelCallDurations(job) {
     }
   }
 
-  modelCallParserState.set(job.id, { processed: logs.length, pendingByBatch });
+  modelCallParserState.set(job.id, { seenKeys: [...seenKeys].slice(-120), pendingByBatch });
 }
 
 const PROMPT_FIELD_IDS = [
@@ -1209,6 +1317,7 @@ function collectRuntimeOverridePayload() {
 function updateSelectedFileLabel() {
   const file = fileInput.files && fileInput.files[0];
   selectedFile.textContent = file ? file.name : "No file selected";
+  if (file) delete selectedFile.dataset.tone;
   if (!file) {
     sourceSubtitleTextStats = null;
   }
@@ -1243,6 +1352,13 @@ function acceptSelectedSourceFile() {
 function updateSelectedTranslatedFileLabel() {
   const file = translatedFileInput.files && translatedFileInput.files[0];
   selectedTranslatedFile.innerHTML = file ? escapeHtml(file.name) : `Optional second <code>.srt</code>`;
+  form?.classList.toggle("is-review-ready", Boolean(file));
+  if (reviewExistingBtn) {
+    reviewExistingBtn.setAttribute("aria-describedby", "selected-translated-file");
+    reviewExistingBtn.title = file
+      ? `Review ${file.name} against the selected source subtitle.`
+      : "Select a translated subtitle above to review an existing translation.";
+  }
 }
 
 function updateSelectedVideoFileLabel() {
@@ -1402,7 +1518,7 @@ function addReferenceTrackRow(language = "") {
         <input type="text" data-reference-language value="${escapeHtml(language)}" placeholder="es, fr, ja..." />
       </label>
       <label class="secondary-file reference-track-picker" data-reference-picker="true" title="Optional supporting subtitle file used only as aligned context during translation.">
-        <input type="file" data-reference-file accept=".srt" hidden />
+        <input type="file" class="visually-hidden-file" data-reference-file accept=".srt" />
         <span class="secondary-file-label">Reference Subtitle</span>
         <span class="secondary-file-value" data-reference-file-name>Choose supporting .srt</span>
       </label>
@@ -2277,9 +2393,10 @@ function renderContext(job) {
   const delta = diffSessionSnapshot(previousRendered, ctx);
   renderedContextSnapshots.set(job.id, cloneSnapshot(ctx));
   const validation = job.validation_stats || {};
-  const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
-  const translatedCount = Number(Array.isArray(job.translated_lines) ? job.translated_lines.length : 0);
-  const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
+  const reviewCounts = jobReviewCounts(job);
+  const fixedTotal = reviewCounts.fixed;
+  const translatedCount = jobTranslatedCount(job);
+  const sourceCount = jobSourceCount(job);
   const etaLabel = job.status === "processing" ? formatJobEta(job) : "Paused";
   const timeoutWarning = latestTimeoutWarning(job);
   const canResume = job.status === "paused" || job.status === "failed";
@@ -2290,7 +2407,7 @@ function renderContext(job) {
     : "Resume a paused job from the next pending batch using current Prompt Lab runtime settings.";
   return `
     <div class="context-card">
-      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="Open the verbose execution log with retries, validation checks, and flagged lines.">
+      <button class="job-corner-log" data-action="logs" data-id="${job.id}" aria-label="Open job log" title="Open the verbose execution log with retries, validation checks, and flagged lines.">
         <span class="job-corner-label" aria-hidden="true">log</span>
       </button>
       <div class="panel-head">
@@ -2336,7 +2453,7 @@ function renderContext(job) {
         ${validationStat(
           job.id,
           "Suspect",
-          validation.suspicious_subtitles || 0,
+          reviewCounts.suspect,
           "is-suspect",
           "Subtitle lines flagged by validation as likely untranslated or still in the source language.",
           "suspect",
@@ -2352,7 +2469,7 @@ function renderContext(job) {
       ${validationStat(
           job.id,
           "Error",
-          validation.error_subtitles || 0,
+          reviewCounts.error,
           "is-error",
           "Subtitle lines that still looked wrong after retry and fallback handling.",
           "error",
@@ -2385,10 +2502,223 @@ function renderContext(job) {
   `;
 }
 
+function jobSourceCount(job) {
+  return Math.max(0, Number(job?.source_count ?? job?.source_line_count ?? (Array.isArray(job?.original_lines) ? job.original_lines.length : 0)) || 0);
+}
+
+function jobTranslatedCount(job) {
+  return Math.max(0, Number(job?.translated_count ?? job?.translated_line_count ?? (Array.isArray(job?.translated_lines) ? job.translated_lines.length : 0)) || 0);
+}
+
+function jobLogCount(job) {
+  return Math.max(0, Number(job?.log_count ?? (Array.isArray(job?.logs) ? job.logs.length : 0)) || 0);
+}
+
+function jobIssueCount(job) {
+  return Math.max(0, Number(job?.issue_count ?? job?.validation_issue_count ?? (Array.isArray(job?.validation_issues) ? job.validation_issues.length : 0)) || 0);
+}
+
+function jobReviewCounts(job) {
+  const supplied = job?.review_counts;
+  if (supplied && typeof supplied === "object") {
+    const autoFixed = Math.max(0, Number(supplied.auto_fixed || 0));
+    const manualFixed = Math.max(0, Number(supplied.manual_fixed || 0));
+    return {
+      suspect: Math.max(0, Number(supplied.suspect || 0)),
+      error: Math.max(0, Number(supplied.error || 0)),
+      autoFixed,
+      manualFixed,
+      fixed: Math.max(0, Number(supplied.fixed ?? (autoFixed + manualFixed))),
+    };
+  }
+  const issues = Array.isArray(job?.validation_issues) ? job.validation_issues : [];
+  if (issues.length) {
+    const counts = { suspect: 0, error: 0, autoFixed: 0, manualFixed: 0, fixed: 0 };
+    for (const issue of issues) {
+      if (issue?.status === "suspect") counts.suspect += 1;
+      else if (issue?.status === "error") counts.error += 1;
+      else if (issue?.status === "auto_fixed") counts.autoFixed += 1;
+      else if (issue?.status === "manual_fixed") counts.manualFixed += 1;
+    }
+    counts.fixed = counts.autoFixed + counts.manualFixed;
+    return counts;
+  }
+  const validation = job?.validation_stats || {};
+  const autoFixed = Math.max(0, Number(validation.auto_fixed_subtitles || 0));
+  const manualFixed = Math.max(0, Number(validation.manual_fixed_subtitles || 0));
+  return {
+    suspect: Math.max(0, Number(validation.suspicious_subtitles || 0)),
+    error: Math.max(0, Number(validation.error_subtitles || 0)),
+    autoFixed,
+    manualFixed,
+    fixed: autoFixed + manualFixed,
+  };
+}
+
+function jobNeedsAttention(job) {
+  const counts = jobReviewCounts(job);
+  return ["failed", "cancelled"].includes(job?.status)
+    || counts.suspect > 0
+    || counts.error > 0;
+}
+
+function filterJobs(jobs) {
+  const needle = currentJobsSearch.trim().toLowerCase();
+  return jobs.filter(job => {
+    if (currentJobsFilter === "active" && !["queued", "processing", "paused"].includes(job.status)) return false;
+    if (currentJobsFilter === "completed" && job.status !== "completed") return false;
+    if (currentJobsFilter === "attention" && !jobNeedsAttention(job)) return false;
+    if (!needle) return true;
+    const haystack = [
+      job.title,
+      job.filename,
+      job.status,
+      job.job_kind,
+      job?.settings?.model,
+      job?.settings?.source_language,
+      job?.settings?.target_language,
+      job.message,
+    ].filter(Boolean).join("\n").toLowerCase();
+    return haystack.includes(needle);
+  });
+}
+
+function updateJobsToolbar(jobs, visibleJobs) {
+  const counts = {
+    all: jobs.length,
+    active: jobs.filter(job => ["queued", "processing", "paused"].includes(job.status)).length,
+    completed: jobs.filter(job => job.status === "completed").length,
+    attention: jobs.filter(jobNeedsAttention).length,
+  };
+  for (const button of jobsFilterButtons) {
+    const key = button.dataset.jobsFilter || "all";
+    const active = key === currentJobsFilter;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+    const count = button.querySelector("[data-jobs-filter-count]");
+    if (count) count.textContent = String(counts[key] || 0);
+  }
+  if (jobsResultSummaryEl) {
+    const filtered = currentJobsFilter !== "all" || currentJobsSearch.trim();
+    jobsResultSummaryEl.textContent = filtered
+      ? `${visibleJobs.length} of ${jobs.length} saved jobs shown`
+      : `${jobs.length} saved job${jobs.length === 1 ? "" : "s"}`;
+  }
+  const evidenceJobs = visibleJobs.filter(job => (job.reference_tracks || []).length || job?.settings?.adaptive_vision || job?.settings?.visual_scene_context);
+  const allCollapsed = evidenceJobs.length > 0 && evidenceJobs.every(job => collapsedJobAuxiliary.has(job.id));
+  if (jobsEvidenceToggle) {
+    jobsEvidenceToggle.textContent = allCollapsed ? "Expand evidence" : "Collapse evidence";
+    jobsEvidenceToggle.disabled = evidenceJobs.length === 0;
+  }
+  if (clearFinishedBtn && clearFinishedBtn.dataset.busy !== "true") {
+    const finishedCount = jobs.filter(job => ["completed", "failed", "cancelled"].includes(job.status)).length;
+    clearFinishedBtn.textContent = finishedCount ? `Clear Finished (${finishedCount})` : "Clear Finished";
+    clearFinishedBtn.disabled = finishedCount === 0;
+  }
+}
+
+function captureJobsFocus() {
+  const active = document.activeElement;
+  if (!(active instanceof Element) || (!jobsEl?.contains(active) && !activeJobCard?.contains(active))) return null;
+  if (active.matches("[data-action][data-id]")) {
+    return { type: "action", action: active.dataset.action, id: active.dataset.id };
+  }
+  const vision = active.closest("[data-vision-frame][data-vision-job]");
+  if (vision) return { type: "vision", jobId: vision.dataset.visionJob, frameId: vision.dataset.visionFrame };
+  const more = active.closest("[data-job-more]");
+  if (more) return { type: "more", id: more.dataset.jobMore };
+  const link = active.closest("a[href^='/review/']");
+  if (link) return { type: "link", href: link.getAttribute("href") };
+  return null;
+}
+
+function restoreJobsFocus(key) {
+  if (!key) return;
+  let target = null;
+  const roots = [activeJobCard, jobsEl].filter(Boolean);
+  const all = selector => roots.flatMap(root => [...root.querySelectorAll(selector)]);
+  if (key.type === "action") {
+    target = all("[data-action][data-id]").find(item => item.dataset.action === key.action && item.dataset.id === key.id);
+  } else if (key.type === "vision") {
+    target = all("[data-vision-frame][data-vision-job]").find(item => item.dataset.visionJob === key.jobId && item.dataset.visionFrame === key.frameId);
+  } else if (key.type === "more") {
+    target = roots.map(root => root.querySelector(`[data-job-more="${CSS.escape(key.id || "")}"] > summary`)).find(Boolean);
+  } else if (key.type === "link") {
+    target = all("a[href^='/review/']").find(item => item.getAttribute("href") === key.href);
+  }
+  target?.focus({ preventScroll: true });
+}
+
+function jobCardRenderSignature(job) {
+  return JSON.stringify(job)
+    + `|aux:${collapsedJobAuxiliary.has(job.id) ? 0 : 1}`
+    + `|more:${expandedJobMoreActions.has(job.id) ? 1 : 0}`;
+}
+
+function reconcileJobsMarkup(markup, signatures) {
+  const template = document.createElement("template");
+  template.innerHTML = markup.trim();
+  const nextSummary = template.content.querySelector(".jobs-summary");
+  const nextList = template.content.querySelector(".job-list");
+  if (!nextSummary || !nextList) {
+    jobsEl.innerHTML = markup;
+    jobCardRenderSignatures.clear();
+    for (const [id, signature] of signatures) jobCardRenderSignatures.set(id, signature);
+    return;
+  }
+
+  const currentSummary = jobsEl.querySelector(":scope > .jobs-summary");
+  if (currentSummary) currentSummary.replaceWith(nextSummary);
+  else jobsEl.prepend(nextSummary);
+
+  let currentList = jobsEl.querySelector(":scope > .job-list");
+  if (!currentList) {
+    jobsEl.append(nextList);
+    currentList = nextList;
+  } else {
+    const desiredIds = new Set();
+    const nextHasEmptyState = Boolean(nextList.querySelector(":scope > .jobs-empty-filter"));
+    let cursor = currentList.firstElementChild;
+    for (const nextChild of [...nextList.children]) {
+      const id = nextChild.dataset.jobId || "";
+      if (!id) {
+        const existingEmpty = currentList.querySelector(":scope > .jobs-empty-filter");
+        if (existingEmpty) existingEmpty.replaceWith(nextChild);
+        else currentList.append(nextChild);
+        continue;
+      }
+      desiredIds.add(id);
+      const existing = [...currentList.children].find(child => child.dataset.jobId === id) || null;
+      const signature = signatures.get(id) || "";
+      let card = nextChild;
+      if (existing && jobCardRenderSignatures.get(id) === signature) {
+        existing.hidden = nextChild.hidden;
+        card = existing;
+      } else if (existing) {
+        const replacingCursor = existing === cursor;
+        existing.replaceWith(nextChild);
+        if (replacingCursor) cursor = nextChild;
+      }
+      if (card !== cursor) currentList.insertBefore(card, cursor);
+      cursor = card.nextElementSibling;
+    }
+    for (const child of [...currentList.children]) {
+      const id = child.dataset.jobId || "";
+      if (id && !desiredIds.has(id)) child.remove();
+      if (!id && child.matches(".jobs-empty-filter") && !nextHasEmptyState) child.remove();
+    }
+  }
+
+  jobCardRenderSignatures.clear();
+  for (const [id, signature] of signatures) jobCardRenderSignatures.set(id, signature);
+}
+
 function renderJobs(jobs) {
+  const focusKey = captureJobsFocus();
   captureVisionRailScrolls(activeJobCard);
   captureVisionRailScrolls(jobsEl);
   if (!jobs.length) {
+    updateJobsToolbar(jobs, []);
     jobsEl.innerHTML = `<p class="job-meta">No jobs yet.</p>`;
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
@@ -2397,7 +2727,9 @@ function renderJobs(jobs) {
     return;
   }
 
-  const active = jobs.find(job => job.status === "processing" || job.status === "paused");
+  const active = jobs.find(job => job.status === "processing")
+    || jobs.find(job => job.status === "queued")
+    || jobs.find(job => job.status === "paused");
   if (active && active.session_context) {
     const existingBar = activeJobCard.querySelector(".js-model-call-progress-bar");
     if (existingBar && existingBar.parentElement) {
@@ -2420,13 +2752,18 @@ function renderJobs(jobs) {
     modelCallRenderedState.clear();
   }
 
+  const visibleJobs = filterJobs(jobs);
+  const visibleJobIds = new Set(visibleJobs.map(job => job.id));
+  const nextCardSignatures = new Map(jobs.map(job => [job.id, jobCardRenderSignature(job)]));
+  updateJobsToolbar(jobs, visibleJobs);
   const counts = jobs.reduce((acc, job) => {
     acc.total += 1;
     acc[job.status] = (acc[job.status] || 0) + 1;
     return acc;
-  }, { total: 0, processing: 0, paused: 0, completed: 0, failed: 0, cancelled: 0 });
+  }, { total: 0, queued: 0, processing: 0, paused: 0, completed: 0, failed: 0, cancelled: 0 });
+  const attentionCount = jobs.filter(jobNeedsAttention).length;
 
-  jobsEl.innerHTML = `
+  const nextJobsMarkup = `
     <div class="jobs-summary">
       <div class="job-stat">
         <span class="job-stat-label">Total</span>
@@ -2434,15 +2771,15 @@ function renderJobs(jobs) {
       </div>
       <div class="job-stat">
         <span class="job-stat-label">Active</span>
-        <strong>${counts.processing + counts.paused}</strong>
+        <strong>${counts.queued + counts.processing + counts.paused}</strong>
       </div>
       <div class="job-stat">
         <span class="job-stat-label">Completed</span>
         <strong>${counts.completed}</strong>
       </div>
       <div class="job-stat">
-        <span class="job-stat-label">Issues</span>
-        <strong>${counts.failed + counts.cancelled}</strong>
+        <span class="job-stat-label">Attention</span>
+        <strong>${attentionCount}</strong>
       </div>
     </div>
     <div class="job-list">${jobs.map(job => {
@@ -2453,23 +2790,24 @@ function renderJobs(jobs) {
       const targetLanguage = escapeHtml(job?.settings?.target_language || "n/a");
       const model = escapeHtml(job?.settings?.model || "No model");
       const referenceTracks = Array.isArray(job.reference_tracks) ? job.reference_tracks : [];
-      const sourceCount = Number(Array.isArray(job.original_lines) ? job.original_lines.length : 0);
+      const sourceCount = jobSourceCount(job);
       const requestTimeout = Math.max(15, Number(job?.settings?.request_timeout_seconds || 120));
       const referenceLanguages = referenceTracks.map(track => String(track?.language || "").trim()).filter(Boolean);
       const kind = job?.job_kind === "review" ? "Validation Review" : "Translation";
       const message = escapeHtml(job.message || "Waiting for update.");
       const timeoutWarning = latestTimeoutWarning(job);
-      const logCount = Array.isArray(job.logs) ? job.logs.length : 0;
+      const logCount = jobLogCount(job);
       const logTitle = logCount
         ? `Show verbose runtime events, retries, and validation decisions. ${logCount} log entries available.`
         : "Show verbose runtime events, retries, and validation decisions.";
       const validation = job.validation_stats || {};
+      const reviewCounts = jobReviewCounts(job);
       const vision = job.vision_stats || {};
       const adaptiveVisionEnabled = Boolean(job?.settings?.adaptive_vision);
       const sceneVisionEnabled = Boolean(job?.settings?.visual_scene_context);
       const visionEnabled = adaptiveVisionEnabled || sceneVisionEnabled;
-      const issueCount = Array.isArray(job.validation_issues) ? job.validation_issues.length : 0;
-      const fixedTotal = Number(validation.auto_fixed_subtitles || 0) + Number(validation.manual_fixed_subtitles || 0);
+      const issueCount = jobIssueCount(job);
+      const fixedTotal = reviewCounts.fixed;
       const canResume = job.status === "paused" || job.status === "failed";
       const canReload = job.status !== "processing" && job.status !== "queued";
       const resumeLabel = job.status === "failed" ? "Resume Failed" : "Resume";
@@ -2489,8 +2827,8 @@ function renderJobs(jobs) {
           ? "Restart from line 1 with different settings while retaining completed visual scene guides."
           : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
-    <article class="job job-workspace-link" data-workspace-url="/review/${job.id}">
-      <button class="job-corner-log" data-action="logs" data-id="${job.id}" title="${escapeHtml(logTitle)}">
+    <article class="job job-workspace-link" data-job-id="${escapeHtml(job.id)}" data-workspace-url="/review/${job.id}" ${visibleJobIds.has(job.id) ? "" : "hidden"}>
+      <button class="job-corner-log" data-action="logs" data-id="${job.id}" aria-label="Open job log" title="${escapeHtml(logTitle)}">
         <span class="job-corner-label" aria-hidden="true">log</span>
       </button>
       <div class="job-top">
@@ -2533,10 +2871,10 @@ function renderJobs(jobs) {
       ${renderEtaPill(job)}
       <div class="progress"><div class="progress-bar" style="width:${job.progress || 0}%"></div></div>
       <div class="job-health" aria-label="Job validation summary">
-        <button type="button" data-action="review-lines" data-id="${job.id}" data-filter="all" title="Open all subtitle lines"><small>Lines</small><strong>${escapeHtml(String(sourceCount || 0))}</strong></button>
-        <button type="button" class="is-suspect" data-action="review-lines" data-id="${job.id}" data-filter="suspect" title="Open suspected subtitle lines"><small>Suspect</small><strong>${escapeHtml(String(validation.suspicious_subtitles || 0))}</strong></button>
-        <button type="button" class="is-fixed" data-action="review-lines" data-id="${job.id}" data-filter="fixed" title="Open automatically and manually fixed lines"><small>Fixed</small><strong>${escapeHtml(String(fixedTotal))}</strong></button>
-        <button type="button" class="is-error" data-action="review-lines" data-id="${job.id}" data-filter="error" title="Open subtitle lines with unresolved errors"><small>Errors</small><strong>${escapeHtml(String(validation.error_subtitles || 0))}</strong></button>
+        <button type="button" data-action="open-workspace" data-id="${job.id}" data-filter="all" title="Open all subtitle lines in Review Workspace"><small>Lines</small><strong>${escapeHtml(String(sourceCount || 0))}</strong></button>
+        <button type="button" class="is-suspect" data-action="open-workspace" data-id="${job.id}" data-filter="suspect" title="Open suspected subtitle lines in Review Workspace"><small>Suspect</small><strong>${escapeHtml(String(reviewCounts.suspect))}</strong></button>
+        <button type="button" class="is-fixed" data-action="open-workspace" data-id="${job.id}" data-filter="fixed" title="Open automatically and manually fixed lines in Review Workspace"><small>Fixed</small><strong>${escapeHtml(String(fixedTotal))}</strong></button>
+        <button type="button" class="is-error" data-action="open-workspace" data-id="${job.id}" data-filter="error" title="Open subtitle lines with unresolved errors in Review Workspace"><small>Errors</small><strong>${escapeHtml(String(reviewCounts.error))}</strong></button>
       </div>
       ${(referenceTracks.length || visionEnabled) ? `
         <details class="job-auxiliary-details" data-job-auxiliary="${escapeHtml(job.id)}" ${collapsedJobAuxiliary.has(job.id) ? "" : "open"}>
@@ -2549,9 +2887,11 @@ function renderJobs(jobs) {
       ` : ""}
     </article>
   `;
-    }).join("")}</div>
+    }).join("")}${visibleJobs.length ? "" : `<div class="jobs-empty-filter"><strong>No matching jobs</strong><span>Try another status or search term. No jobs were removed.</span></div>`}</div>
   `;
+  reconcileJobsMarkup(nextJobsMarkup, nextCardSignatures);
   refreshVisionRails(jobsEl);
+  requestAnimationFrame(() => restoreJobsFocus(focusKey));
 }
 
 function renderLogDialog(job, options = {}) {
@@ -2587,10 +2927,10 @@ function renderLogDialog(job, options = {}) {
   }
   logDialogBody.innerHTML = `
     <div class="log-tabs" role="tablist" aria-label="Log sections">
-      <button type="button" class="log-tab ${activeTab === "events" ? "active" : ""}" data-log-tab="events">Events ${escapeHtml(String(logs.length))}</button>
-      <button type="button" class="log-tab ${activeTab === "references" ? "active" : ""}" data-log-tab="references" ${referenceTracks.length ? "" : "disabled"}>References ${escapeHtml(String(referenceTracks.length))}</button>
-      <button type="button" class="log-tab ${activeTab === "vision" ? "active" : ""}" data-log-tab="vision" ${visionEnabled ? "" : "disabled"}>Vision ${escapeHtml(String(visualObservations.length + (job.visual_scene_contexts || []).length))}</button>
-      <button type="button" class="log-tab ${activeTab === "issues" ? "active" : ""}" data-log-tab="issues" ${issueCount ? "" : "disabled"}>Issues ${escapeHtml(String(issueCount))}</button>
+      <button type="button" role="tab" id="log-tab-events" aria-controls="log-panel-events" aria-selected="${activeTab === "events"}" tabindex="${activeTab === "events" ? "0" : "-1"}" class="log-tab ${activeTab === "events" ? "active" : ""}" data-log-tab="events">Events ${escapeHtml(String(logs.length))}</button>
+      <button type="button" role="tab" id="log-tab-references" aria-controls="log-panel-references" aria-selected="${activeTab === "references"}" tabindex="${activeTab === "references" ? "0" : "-1"}" class="log-tab ${activeTab === "references" ? "active" : ""}" data-log-tab="references" ${referenceTracks.length ? "" : "disabled"}>References ${escapeHtml(String(referenceTracks.length))}</button>
+      <button type="button" role="tab" id="log-tab-vision" aria-controls="log-panel-vision" aria-selected="${activeTab === "vision"}" tabindex="${activeTab === "vision" ? "0" : "-1"}" class="log-tab ${activeTab === "vision" ? "active" : ""}" data-log-tab="vision" ${visionEnabled ? "" : "disabled"}>Vision ${escapeHtml(String(visualObservations.length + (job.visual_scene_contexts || []).length))}</button>
+      <button type="button" role="tab" id="log-tab-issues" aria-controls="log-panel-issues" aria-selected="${activeTab === "issues"}" tabindex="${activeTab === "issues" ? "0" : "-1"}" class="log-tab ${activeTab === "issues" ? "active" : ""}" data-log-tab="issues" ${issueCount ? "" : "disabled"}>Issues ${escapeHtml(String(issueCount))}</button>
       <span class="log-follow-state">${preserveScroll && !wasNearTop ? "Reading position locked" : "Following newest"}</span>
     </div>
     <div class="log-overview">
@@ -2618,7 +2958,7 @@ function renderLogDialog(job, options = {}) {
       ` : ""}
     </div>
     ${renderRuntimeActivity(job)}
-    <section class="log-tab-panel ${activeTab === "events" ? "active" : ""}" data-log-panel="events">
+    <section role="tabpanel" id="log-panel-events" aria-labelledby="log-tab-events" class="log-tab-panel ${activeTab === "events" ? "active" : ""}" data-log-panel="events" ${activeTab === "events" ? "" : "hidden"}>
       ${latestEvent ? `
         <article class="log-entry latest ${latestLevel}">
           <div class="log-entry-head">
@@ -2652,7 +2992,7 @@ function renderLogDialog(job, options = {}) {
         </div>
       </div>
     </section>
-    <section class="log-tab-panel ${activeTab === "references" ? "active" : ""}" data-log-panel="references">
+    <section role="tabpanel" id="log-panel-references" aria-labelledby="log-tab-references" class="log-tab-panel ${activeTab === "references" ? "active" : ""}" data-log-panel="references" ${activeTab === "references" ? "" : "hidden"}>
       ${referenceTracks.length ? `
         <div class="mini-eyebrow">Reference Track Alignment</div>
         <p class="job-meta">Reference tracks are supporting context only. The primary subtitle remains canonical.</p>
@@ -2661,7 +3001,7 @@ function renderLogDialog(job, options = {}) {
         </div>
       ` : `<p class="job-meta">No reference subtitles were loaded for this job.</p>`}
     </section>
-    <section class="log-tab-panel ${activeTab === "vision" ? "active" : ""}" data-log-panel="vision">
+    <section role="tabpanel" id="log-panel-vision" aria-labelledby="log-tab-vision" class="log-tab-panel ${activeTab === "vision" ? "active" : ""}" data-log-panel="vision" ${activeTab === "vision" ? "" : "hidden"}>
       ${visionEnabled ? `
         <div class="mini-eyebrow">Visual Understanding</div>
         <p class="job-meta">
@@ -2711,7 +3051,7 @@ function renderLogDialog(job, options = {}) {
         ` : `<p class="job-meta">No visual clarification has been needed yet.</p>`}
       ` : `<p class="job-meta">Adaptive vision is disabled for this job.</p>`}
     </section>
-    <section class="log-tab-panel ${activeTab === "issues" ? "active" : ""}" data-log-panel="issues">
+    <section role="tabpanel" id="log-panel-issues" aria-labelledby="log-tab-issues" class="log-tab-panel ${activeTab === "issues" ? "active" : ""}" data-log-panel="issues" ${activeTab === "issues" ? "" : "hidden"}>
       ${issues.length ? `
         <div class="mini-eyebrow">Flagged Subtitle Lines</div>
         <div class="issue-list">
@@ -3027,97 +3367,202 @@ function renderReviewDialog(job, filter = "all") {
   `;
 }
 
-async function fetchJobs() {
-  const response = await fetch("/api/jobs");
-  const jobs = await response.json();
-  jobsById.clear();
-  for (const job of jobs) {
-    jobsById.set(job.id, job);
+async function fetchFullJob(jobId, signal = undefined) {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { signal });
+  if (!response.ok) throw new Error(`Could not load job details (${response.status}).`);
+  const job = await response.json();
+  fullJobsById.set(jobId, job);
+  return job;
+}
+
+async function fetchReviewJob(jobId, signal = undefined) {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}?view=review`, { signal });
+  if (!response.ok) throw new Error(`Could not load review data (${response.status}).`);
+  const job = await response.json();
+  reviewJobsById.set(jobId, job);
+  return job;
+}
+
+function mergeJobDetail(summary, detail) {
+  if (!detail) return summary;
+  const merged = {
+    ...detail,
+    ...summary,
+    settings: { ...(detail.settings || {}), ...(summary.settings || {}) },
+  };
+  for (const field of [
+    "original_lines",
+    "translated_lines",
+    "logs",
+    "validation_issues",
+    "pending_retranslations",
+    "visual_frames",
+    "visual_observations",
+    "visual_scene_contexts",
+    "batch_context_snapshots",
+    "reference_tracks",
+  ]) {
+    if (Array.isArray(detail[field])) merged[field] = detail[field];
   }
-  for (const job of jobs) {
-    learnModelCallDurations(job);
-  }
-  const models = [];
-  for (const job of jobs) {
-    if (job?.settings?.model) models.push(job.settings.model);
-  }
-  if (modelInput?.value) models.unshift(modelInput.value);
-  writeModelHistory(models);
-  renderJobs(jobs);
-  if (editingJobId) {
-    const openJob = jobs.find(job => job.id === editingJobId);
-    if (openJob) {
-      renderMainContextDialog(openJob, openJob.session_context || {});
-      if (!dialog?.open) {
-        dialog?.showModal();
-      }
-    } else if (dialog?.open) {
-      dialog.close();
-      editingJobId = null;
+  return merged;
+}
+
+async function fetchJobs({ force = false, periodic = false } = {}) {
+  if (jobsFetchInFlight && periodic) return;
+  const sequence = ++jobsFetchSequence;
+  jobsFetchController?.abort();
+  const controller = new AbortController();
+  jobsFetchController = controller;
+  jobsFetchInFlight = true;
+  if (force) setJobsSyncStatus("Syncing…", "syncing");
+  try {
+    const response = await fetch("/api/jobs?view=summary", { signal: controller.signal });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    const payload = await response.text();
+    if (sequence !== jobsFetchSequence) return;
+    const changed = payload !== lastJobsPayload;
+    if (!changed && !force) {
+      const recovered = jobsConnectionFailed;
+      jobsConnectionFailed = false;
+      setJobsSyncStatus("Live", "live");
+      if (recovered) setFormReloadStatus("Connection restored", "Saved jobs and live progress are current again.", "info");
+      return;
     }
-  }
-  if (openLogJobId) {
-    const openJob = jobs.find(job => job.id === openLogJobId);
-    if (openJob) {
-      renderLogDialog(openJob, { preserveScroll: true });
-      if (!logDialog?.open) {
-        logDialog?.showModal();
-      }
-    } else if (logDialog?.open) {
-      logDialog.close();
-      openLogJobId = null;
+
+    let jobs = JSON.parse(payload);
+    for (const job of jobs) {
+      if (!("model_activity_logs" in job) && !("latest_log" in job)) continue;
+      const activityLogs = Array.isArray(job.model_activity_logs) ? job.model_activity_logs : [];
+      const latestLogs = job.latest_log ? [...activityLogs, job.latest_log] : activityLogs;
+      const seenLogs = new Set();
+      job.logs = latestLogs.filter(entry => {
+        const key = `${entry?.timestamp || ""}|${entry?.batch_index ?? ""}|${entry?.message || ""}`;
+        if (seenLogs.has(key)) return false;
+        seenLogs.add(key);
+        return true;
+      }).sort((a, b) => Date.parse(String(a?.timestamp || "")) - Date.parse(String(b?.timestamp || "")));
     }
-  }
-  if (openReviewJobId) {
-    const openJob = jobs.find(job => job.id === openReviewJobId);
-    if (openJob) {
-      const activeReviewInput = reviewDialog?.open
-        ? reviewDialog.querySelector("[data-review-editable]:focus")
-        : null;
-      if (!activeReviewInput) {
-        renderReviewDialog(openJob, openReviewFilter);
+
+    const detailIds = new Set([
+      editingJobId,
+      openLogJobId,
+      openReviewJobId,
+      openSnapshotJobId,
+    ].filter(Boolean));
+    const detailEntries = await Promise.all([...detailIds].map(async id => {
+      try {
+        const summary = jobs.find(job => job.id === id);
+        const terminal = summary && ["completed", "failed", "cancelled"].includes(summary.status);
+        if (id === openReviewJobId && id !== openLogJobId && id !== editingJobId) {
+          return [id, await fetchReviewJob(id, controller.signal)];
+        }
+        const cached = fullJobsById.get(id);
+        if (cached && (terminal || id === openSnapshotJobId || id === editingJobId)) {
+          return [id, cached];
+        }
+        return [id, await fetchFullJob(id, controller.signal)];
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        return [id, reviewJobsById.get(id) || fullJobsById.get(id) || null];
       }
-      if (!reviewDialog?.open) {
-        reviewDialog?.showModal();
-      }
-    } else if (reviewDialog?.open) {
-      reviewDialog.close();
-      openReviewJobId = null;
-      openReviewFilter = "all";
+    }));
+    if (sequence !== jobsFetchSequence) return;
+    const detailsById = new Map(detailEntries.filter(([, job]) => Boolean(job)));
+    jobs = jobs.map(job => mergeJobDetail(job, detailsById.get(job.id)));
+    for (const id of detailsById.keys()) {
+      const merged = jobs.find(job => job.id === id);
+      if (merged) detailsById.set(id, merged);
     }
-  }
-  if (openSnapshotJobId && openSnapshotBatchIndex !== null) {
-    const openJob = jobs.find(job => job.id === openSnapshotJobId);
-    if (openJob) {
-      const snapshotInfo = deriveBatchInfo(openJob, openSnapshotBatchIndex);
-      if (!snapshotInfo) {
+    currentJobs = jobs;
+    lastJobsPayload = payload;
+
+    jobsById.clear();
+    for (const job of jobs) jobsById.set(job.id, job);
+    for (const job of jobs) learnModelCallDurations(job);
+    const models = jobs.map(job => job?.settings?.model).filter(Boolean);
+    if (modelInput?.value) models.unshift(modelInput.value);
+    writeModelHistory(models);
+    renderJobs(jobs);
+
+    if (editingJobId) {
+      const openJob = detailsById.get(editingJobId);
+      if (openJob) {
+        const activeContextEditor = dialog?.open
+          ? dialog.querySelector("input:focus, textarea:focus, select:focus")
+          : null;
+        if (!activeContextEditor) renderMainContextDialog(openJob, openJob.session_context || {});
+        if (!dialog?.open) dialog?.showModal();
+      } else if (!jobs.some(job => job.id === editingJobId) && dialog?.open) {
+        dialog.close();
+        editingJobId = null;
+      }
+    }
+    if (openLogJobId) {
+      const openJob = detailsById.get(openLogJobId);
+      if (openJob) {
+        const activeLogControl = logDialog?.open
+          ? logDialog.querySelector("button:focus, input:focus, textarea:focus, select:focus")
+          : null;
+        if (!activeLogControl) renderLogDialog(openJob, { preserveScroll: true });
+        if (!logDialog?.open) logDialog?.showModal();
+      } else if (!jobs.some(job => job.id === openLogJobId) && logDialog?.open) {
+        logDialog.close();
+        openLogJobId = null;
+      }
+    }
+    if (openReviewJobId) {
+      const openJob = detailsById.get(openReviewJobId);
+      if (openJob) {
+        const activeReviewInput = reviewDialog?.open
+          ? reviewDialog.querySelector("[data-review-editable]:focus")
+          : null;
+        if (!activeReviewInput) renderReviewDialog(openJob, openReviewFilter);
+        if (!reviewDialog?.open) reviewDialog?.showModal();
+      } else if (!jobs.some(job => job.id === openReviewJobId) && reviewDialog?.open) {
+        reviewDialog.close();
+        openReviewJobId = null;
+        openReviewFilter = "all";
+      }
+    }
+    if (openSnapshotJobId && openSnapshotBatchIndex !== null) {
+      const openJob = detailsById.get(openSnapshotJobId);
+      if (openJob) {
+        const snapshotInfo = deriveBatchInfo(openJob, openSnapshotBatchIndex);
+        if (!snapshotInfo) {
+          openSnapshotJobId = null;
+          openSnapshotBatchIndex = null;
+          if (snapshotDialog?.open) snapshotDialog.close();
+          saveConsoleUiState();
+        } else {
+          const activeSnapshotEditor = snapshotDialog?.open
+            ? snapshotDialog.querySelector("input:focus, textarea:focus, select:focus")
+            : null;
+          if (!activeSnapshotEditor) renderSnapshotDialog(openJob, openSnapshotBatchIndex);
+          if (!snapshotDialog?.open) snapshotDialog?.showModal();
+        }
+      } else if (!jobs.some(job => job.id === openSnapshotJobId) && snapshotDialog?.open) {
+        snapshotDialog.close();
         openSnapshotJobId = null;
         openSnapshotBatchIndex = null;
-        if (snapshotDialog?.open) {
-          snapshotDialog.close();
-        }
-        saveConsoleUiState();
-      } else {
-      const activeSnapshotEditor = snapshotDialog?.open
-        ? snapshotDialog.querySelector("input:focus, textarea:focus, select:focus")
-        : null;
-        if (!activeSnapshotEditor) {
-          renderSnapshotDialog(openJob, openSnapshotBatchIndex);
-        }
-        if (!snapshotDialog?.open) {
-          snapshotDialog?.showModal();
-        }
       }
-    } else if (snapshotDialog?.open) {
-      snapshotDialog.close();
-      openSnapshotJobId = null;
-      openSnapshotBatchIndex = null;
     }
-  }
-  if (consoleUiRestorePending) {
-    requestAnimationFrame(() => {
-      restoreConsoleScrollState();
-    });
+    if (consoleUiRestorePending) requestAnimationFrame(() => restoreConsoleScrollState());
+    const recovered = jobsConnectionFailed;
+    jobsConnectionFailed = false;
+    setJobsSyncStatus("Live", "live");
+    if (recovered) setFormReloadStatus("Connection restored", "Saved jobs and live progress are current again.", "info");
+  } catch (error) {
+    if (error?.name === "AbortError" || sequence !== jobsFetchSequence) return;
+    setJobsSyncStatus("Offline · retrying", "error");
+    if (!jobsConnectionFailed) {
+      setFormReloadStatus("Connection interrupted", "The console is keeping its current state and will retry automatically.", "warn");
+    }
+    jobsConnectionFailed = true;
+  } finally {
+    if (jobsFetchController === controller) {
+      jobsFetchController = null;
+      jobsFetchInFlight = false;
+    }
   }
 }
 
@@ -3151,7 +3596,14 @@ async function createJob(event) {
   if (referenceTracks === null) return;
   const data = new FormData();
   const file = fileInput.files[0];
-  if (!file) return;
+  if (!file) {
+    selectedFile.textContent = "Choose a source .srt before starting.";
+    selectedFile.dataset.tone = "error";
+    dropZone?.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.setTimeout(() => fileInput.focus({ preventScroll: true }), 250);
+    return;
+  }
+  delete selectedFile.dataset.tone;
   const videoFile = videoFileInput?.files && videoFileInput.files[0];
   const localVideoPath = localVideoPathInput?.value.trim() || "";
   const reusableVideoJobId = reusableVideoSource?.jobId || "";
@@ -3168,11 +3620,15 @@ async function createJob(event) {
     return;
   }
   const submitButton = form.querySelector('button[type="submit"]');
-  const originalSubmitText = submitButton?.textContent || "Translate Subtitle";
+  const originalSubmitMarkup = submitButton?.innerHTML || "";
+  const submitLabel = submitButton?.querySelector("span");
+  const submitDetail = submitButton?.querySelector("small");
   createJobInFlight = true;
   if (submitButton) {
     submitButton.disabled = true;
-    submitButton.textContent = "Creating Job...";
+    submitButton.setAttribute("aria-busy", "true");
+    if (submitLabel) submitLabel.textContent = "Creating Job…";
+    if (submitDetail) submitDetail.textContent = "Preparing the translation workspace";
   }
   if (reusableVisualContextJobId) {
     setFormReloadStatus(
@@ -3213,7 +3669,8 @@ async function createJob(event) {
     const response = await postFormDataWithProgress("/api/jobs", data, (loaded, total) => {
       if (!submitButton || !videoFile) return;
       const percent = Math.min(100, Math.round((loaded / total) * 100));
-      submitButton.textContent = percent < 100 ? `Uploading ${percent}%` : "Creating Job...";
+      if (submitLabel) submitLabel.textContent = percent < 100 ? `Uploading ${percent}%` : "Creating Job…";
+      if (submitDetail) submitDetail.textContent = percent < 100 ? "Copying the source video" : "Preparing the translation workspace";
     });
     if (!response.ok) {
       const detail = await responseErrorDetail(response, "Could not create job.");
@@ -3242,7 +3699,8 @@ async function createJob(event) {
     createJobInFlight = false;
     if (submitButton) {
       submitButton.disabled = false;
-      submitButton.textContent = originalSubmitText;
+      submitButton.removeAttribute("aria-busy");
+      submitButton.innerHTML = originalSubmitMarkup;
     }
   }
 }
@@ -3436,7 +3894,7 @@ function handleDroppedFiles(files, targetInput = fileInput) {
     return;
   }
   if (targetInput === fileInput) {
-    updateSelectedFileLabel();
+    acceptSelectedSourceFile();
     return;
   }
   const row = targetInput.closest(".reference-track-row");
@@ -3498,78 +3956,120 @@ function bindReferenceTrackCard(zone) {
   });
 }
 
-async function performAction(action, jobId, filter = "all") {
+async function performAction(action, jobId, filter = "all", trigger = null) {
+  if (action === "open-workspace") {
+    saveConsoleScrollState();
+    window.location.href = `/review/${encodeURIComponent(jobId)}?filter=${encodeURIComponent(filter || "all")}`;
+    return;
+  }
+
+  const job = jobsById.get(jobId) || currentJobs.find(item => item.id === jobId) || null;
   if (action === "delete-job") {
-    const response = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
-    if (!response.ok) {
-      alert("Could not delete job.");
-      return;
-    }
-    await fetchJobs();
-    return;
-  }
-
-  if (action === "review-lines") {
-    const response = await fetch(`/api/jobs/${jobId}`);
-    const job = await response.json();
-    openReviewJobId = jobId;
-    openReviewFilter = filter || "all";
-    renderReviewDialog(job, openReviewFilter);
-    reviewDialog.showModal();
-    return;
-  }
-
-  if (action === "logs") {
-    const response = await fetch(`/api/jobs/${jobId}`);
-    const job = await response.json();
-    openLogJobId = jobId;
-    renderLogDialog(job, { restoreReading: true });
-    logDialog.showModal();
-    return;
-  }
-
-  if (action === "edit") {
-    const response = await fetch(`/api/jobs/${jobId}`);
-    const job = await response.json();
-    renderMainContextDialog(job, job.session_context || {});
-    dialog.showModal();
-    return;
-  }
-
-  if (action === "download") {
-    const response = await fetch(`/api/jobs/${jobId}/download`);
-    if (!response.ok) {
-      alert("Translated subtitle is not available.");
-      return;
-    }
-    const data = await response.json();
-    const blob = new Blob([data.content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = data.filename;
-    link.click();
-    URL.revokeObjectURL(url);
-    return;
-  }
-
-  if (action === "reload-job") {
-    await reloadJobIntoForm(jobId);
-    return;
-  }
-
-  if (action === "resume") {
-    await fetch(`/api/jobs/${jobId}/resume`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runtime_settings: collectRuntimeOverridePayload() }),
+    const confirmed = await requestConfirmation({
+      title: "Delete this job?",
+      message: `“${job?.title || job?.filename || "This job"}” and its saved review data will be permanently removed. Download anything you need first.`,
+      confirmLabel: "Delete Job",
     });
-    await fetchJobs();
-    return;
+    if (!confirmed) return;
+  } else if (action === "stop") {
+    const confirmed = await requestConfirmation({
+      title: "Stop this translation?",
+      message: "The current run will stop after its in-flight work settles. Translated lines already produced remain available for review.",
+      confirmLabel: "Stop Job",
+      tone: "warning",
+    });
+    if (!confirmed) return;
   }
 
-  await fetch(`/api/jobs/${jobId}/${action}`, { method: "POST" });
-  await fetchJobs();
+  const pendingKey = `${jobId}:${action}`;
+  if (pendingJobActions.has(pendingKey)) return;
+  pendingJobActions.add(pendingKey);
+  if (trigger) {
+    trigger.disabled = true;
+    trigger.setAttribute("aria-busy", "true");
+  }
+
+  try {
+    if (action === "delete-job") {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseErrorDetail(response, "Could not delete job."));
+      fullJobsById.delete(jobId);
+      showConsoleToast("Job deleted.", "success");
+      await fetchJobs({ force: true });
+      return;
+    }
+
+    if (action === "review-lines") {
+      const fullJob = await fetchReviewJob(jobId);
+      openReviewJobId = jobId;
+      openReviewFilter = filter || "all";
+      renderReviewDialog(fullJob, openReviewFilter);
+      reviewDialog.showModal();
+      return;
+    }
+
+    if (action === "logs") {
+      const fullJob = await fetchFullJob(jobId);
+      openLogJobId = jobId;
+      renderLogDialog(fullJob, { restoreReading: true });
+      logDialog.showModal();
+      return;
+    }
+
+    if (action === "edit") {
+      const fullJob = await fetchFullJob(jobId);
+      renderMainContextDialog(fullJob, fullJob.session_context || {});
+      dialog.showModal();
+      return;
+    }
+
+    if (action === "download") {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/download`);
+      if (!response.ok) throw new Error(await responseErrorDetail(response, "Translated subtitle is not available."));
+      const data = await response.json();
+      const blob = new Blob([data.content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = data.filename;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      return;
+    }
+
+    if (action === "reload-job") {
+      await reloadJobIntoForm(jobId);
+      return;
+    }
+
+    let response;
+    if (action === "resume") {
+      response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runtime_settings: collectRuntimeOverridePayload() }),
+      });
+    } else {
+      response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/${encodeURIComponent(action)}`, { method: "POST" });
+    }
+    if (!response.ok) throw new Error(await responseErrorDetail(response, `Could not ${action} this job.`));
+    const successMessages = {
+      pause: "Pause requested.",
+      resume: "Resume requested.",
+      stop: "Stop requested.",
+    };
+    if (successMessages[action]) showConsoleToast(successMessages[action], "success");
+    await fetchJobs({ force: true });
+  } catch (error) {
+    showConsoleToast(error?.message || "The job action could not be completed.", "error");
+    setJobsSyncStatus("Action failed", "error");
+  } finally {
+    pendingJobActions.delete(pendingKey);
+    if (trigger?.isConnected) {
+      trigger.disabled = false;
+      trigger.removeAttribute("aria-busy");
+    }
+  }
 }
 
 async function saveReviewedLine(position, resolutionMode = "save") {
@@ -3577,7 +4077,7 @@ async function saveReviewedLine(position, resolutionMode = "save") {
   const field = reviewDialogBody.querySelector(`[data-review-input="${position}"]`);
   if (!field) return;
   reviewDrafts.set(`${openReviewJobId}:${position}`, field.value);
-  const response = await fetch(`/api/jobs/${openReviewJobId}/lines/${position}`, {
+  const response = await fetch(`/api/jobs/${openReviewJobId}/lines/${position}?view=review`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: field.value, resolution_mode: resolutionMode }),
@@ -3587,6 +4087,7 @@ async function saveReviewedLine(position, resolutionMode = "save") {
     return;
   }
   const job = await response.json();
+  reviewJobsById.set(openReviewJobId, job);
   reviewDrafts.delete(`${openReviewJobId}:${position}`);
   renderReviewDialog(job, openReviewFilter);
   await fetchJobs();
@@ -3597,7 +4098,7 @@ async function requestLineRetranslation(position) {
   const instructionField = reviewDialogBody.querySelector(`[data-review-instruction="${position}"]`);
   const extraInstruction = instructionField ? instructionField.value : "";
   reviewInstructionDrafts.set(reviewInstructionKey(openReviewJobId, position), extraInstruction);
-  const response = await fetch(`/api/jobs/${openReviewJobId}/lines/${position}/retranslate`, {
+  const response = await fetch(`/api/jobs/${openReviewJobId}/lines/${position}/retranslate?view=review`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ extra_instruction: extraInstruction }),
@@ -3608,6 +4109,7 @@ async function requestLineRetranslation(position) {
   }
   const data = await response.json();
   const job = data.job;
+  reviewJobsById.set(openReviewJobId, job);
   reviewInstructionDrafts.delete(reviewInstructionKey(openReviewJobId, position));
   renderReviewDialog(job, openReviewFilter);
   await fetchJobs();
@@ -3652,12 +4154,34 @@ async function generateSnapshotContext() {
 }
 
 async function clearFinishedJobs() {
-  const response = await fetch("/api/jobs", { method: "DELETE" });
-  if (!response.ok) {
-    alert("Could not clear finished jobs.");
-    return;
+  if (!clearFinishedBtn || clearFinishedBtn.dataset.busy === "true") return;
+  const finishedCount = currentJobs.filter(job => ["completed", "failed", "cancelled"].includes(job.status)).length;
+  if (!finishedCount) return;
+  const confirmed = await requestConfirmation({
+    title: `Clear ${finishedCount} finished job${finishedCount === 1 ? "" : "s"}?`,
+    message: "Completed, failed, and cancelled jobs will be permanently removed together with their saved review data. Active jobs are not affected.",
+    confirmLabel: "Clear Finished",
+  });
+  if (!confirmed) return;
+  clearFinishedBtn.dataset.busy = "true";
+  clearFinishedBtn.disabled = true;
+  clearFinishedBtn.setAttribute("aria-busy", "true");
+  clearFinishedBtn.textContent = "Clearing…";
+  try {
+    const response = await fetch("/api/jobs", { method: "DELETE" });
+    if (!response.ok) throw new Error(await responseErrorDetail(response, "Could not clear finished jobs."));
+    const data = await response.json();
+    const removed = Math.max(0, Number(data.removed || 0));
+    fullJobsById.clear();
+    showConsoleToast(`${removed} finished job${removed === 1 ? "" : "s"} cleared.`, "success");
+    await fetchJobs({ force: true });
+  } catch (error) {
+    showConsoleToast(error?.message || "Could not clear finished jobs.", "error");
+  } finally {
+    delete clearFinishedBtn.dataset.busy;
+    clearFinishedBtn.removeAttribute("aria-busy");
+    updateJobsToolbar(currentJobs, filterJobs(currentJobs));
   }
-  await fetchJobs();
 }
 
 async function saveEditedContext() {
@@ -3822,7 +4346,7 @@ document.addEventListener("click", (event) => {
     openSnapshotJobId = openReviewJobId;
     openSnapshotBatchIndex = batchIndex;
     scheduleConsoleUiSave();
-    void fetch(`/api/jobs/${openReviewJobId}`)
+    void fetch(`/api/jobs/${openReviewJobId}?view=review`)
       .then(response => response.json())
       .then(job => {
         renderSnapshotDialog(job, batchIndex);
@@ -3847,7 +4371,10 @@ document.addEventListener("click", (event) => {
     scheduleConsoleUiSave();
     void fetch(`/api/jobs/${openLogJobId}`)
       .then(response => response.json())
-      .then(job => renderLogDialog(job));
+      .then(job => {
+        renderLogDialog(job);
+        logDialogBody.querySelector(`[data-log-tab="${CSS.escape(tab)}"]`)?.focus({ preventScroll: true });
+      });
     return;
   }
   const detailTrigger = event.target.closest("[data-detail-trigger]");
@@ -3859,7 +4386,7 @@ document.addEventListener("click", (event) => {
   }
   const button = event.target.closest("[data-action]");
   if (!button) return;
-  void performAction(button.dataset.action, button.dataset.id, button.dataset.filter || "all");
+  void performAction(button.dataset.action, button.dataset.id, button.dataset.filter || "all", button);
 });
 
 document.addEventListener("input", (event) => {
@@ -3923,7 +4450,38 @@ document.addEventListener("toggle", (event) => {
 });
 
 form.addEventListener("submit", createJob);
-refreshBtn.addEventListener("click", () => void fetchJobs());
+form.addEventListener("invalid", (event) => {
+  if (event.target !== fileInput) return;
+  selectedFile.textContent = "Choose a source .srt before starting.";
+  selectedFile.dataset.tone = "error";
+}, true);
+refreshBtn.addEventListener("click", () => void fetchJobs({ force: true }));
+jobsSearchEl?.addEventListener("input", () => {
+  currentJobsSearch = jobsSearchEl.value;
+  renderJobs(currentJobs);
+  scheduleConsoleUiSave();
+});
+for (const button of jobsFilterButtons) {
+  button.addEventListener("click", () => {
+    currentJobsFilter = button.dataset.jobsFilter || "all";
+    renderJobs(currentJobs);
+    scheduleConsoleUiSave();
+  });
+}
+jobsEvidenceToggle?.addEventListener("click", () => {
+  const evidenceJobs = filterJobs(currentJobs).filter(job => (
+    (job.reference_tracks || []).length
+    || job?.settings?.adaptive_vision
+    || job?.settings?.visual_scene_context
+  ));
+  const collapse = evidenceJobs.some(job => !collapsedJobAuxiliary.has(job.id));
+  for (const job of evidenceJobs) {
+    if (collapse) collapsedJobAuxiliary.add(job.id);
+    else collapsedJobAuxiliary.delete(job.id);
+  }
+  renderJobs(currentJobs);
+  scheduleConsoleUiSave();
+});
 clearFinishedBtn?.addEventListener("click", () => void clearFinishedJobs());
 saveContextBtn.addEventListener("click", () => void saveEditedContext());
 generateContextBtn?.addEventListener("click", () => void generateMainContext());
@@ -3940,29 +4498,26 @@ logDialog?.addEventListener("close", () => {
   scheduleConsoleUiSave();
 });
 reviewDialog?.addEventListener("close", () => {
-  if (openReviewJobId) {
-    for (const key of Array.from(reviewDrafts.keys())) {
-      if (key.startsWith(`${openReviewJobId}:`)) {
-        reviewDrafts.delete(key);
-      }
-    }
-    for (const key of Array.from(reviewInstructionDrafts.keys())) {
-      if (key.startsWith(`${openReviewJobId}:`)) {
-        reviewInstructionDrafts.delete(key);
-      }
-    }
-  }
+  const closedReviewJobId = openReviewJobId;
+  const preservedDraft = Boolean(closedReviewJobId && (
+    [...reviewDrafts.keys()].some(key => key.startsWith(`${closedReviewJobId}:`))
+    || [...reviewInstructionDrafts.keys()].some(key => key.startsWith(`${closedReviewJobId}:`))
+  ));
   openReviewJobId = null;
   openReviewFilter = "all";
   scheduleConsoleUiSave();
+  if (preservedDraft) showConsoleToast("Unsaved review draft preserved. Reopen Review Lines to continue.", "warning");
 });
 snapshotDialog?.addEventListener("close", () => {
-  if (openSnapshotJobId && openSnapshotBatchIndex !== null) {
-    contextEditorDrafts.delete(snapshotDraftKey(openSnapshotJobId, openSnapshotBatchIndex));
-  }
+  const preservedDraft = Boolean(
+    openSnapshotJobId
+    && openSnapshotBatchIndex !== null
+    && contextEditorDrafts.has(snapshotDraftKey(openSnapshotJobId, openSnapshotBatchIndex))
+  );
   openSnapshotJobId = null;
   openSnapshotBatchIndex = null;
   scheduleConsoleUiSave();
+  if (preservedDraft) showConsoleToast("Unsaved Batch Card draft preserved. Reopen it to continue.", "warning");
 });
 logDialogBody?.addEventListener("scroll", () => {
   if (!openLogJobId) return;
@@ -3971,6 +4526,20 @@ logDialogBody?.addEventListener("scroll", () => {
     scrollHeight: logDialogBody.scrollHeight,
   });
 }, { passive: true });
+logDialogBody?.addEventListener("keydown", (event) => {
+  const current = event.target instanceof Element ? event.target.closest('[role="tab"][data-log-tab]') : null;
+  if (!current || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [...logDialogBody.querySelectorAll('[role="tab"][data-log-tab]:not(:disabled)')];
+  const index = tabs.indexOf(current);
+  if (index < 0 || !tabs.length) return;
+  event.preventDefault();
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? tabs.length - 1
+      : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[nextIndex]?.click();
+});
 document.addEventListener("scroll", (event) => {
   const rail = event.target instanceof Element && event.target.matches(".vision-rail")
     ? event.target
@@ -3983,8 +4552,18 @@ document.addEventListener("scroll", (event) => {
 document.addEventListener("wheel", (event) => {
   const rail = event.target instanceof Element ? event.target.closest(".vision-rail") : null;
   if (!rail || rail.scrollWidth <= rail.clientWidth) return;
-  const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  const deltaScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? rail.clientWidth
+      : 1;
+  const rawDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  const horizontalDelta = rawDelta * deltaScale;
   if (!horizontalDelta) return;
+  const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+  if ((horizontalDelta < 0 && rail.scrollLeft <= 1) || (horizontalDelta > 0 && rail.scrollLeft >= maxScroll - 1)) {
+    return;
+  }
   event.preventDefault();
   const now = performance.now();
   const direction = Math.sign(horizontalDelta);
@@ -3995,7 +4574,7 @@ document.addEventListener("wheel", (event) => {
   const magnitude = Math.abs(horizontalDelta);
   const burstAcceleration = rapidRepeat ? Math.log2(streak + 1) * 0.72 : 0;
   const gestureAcceleration = magnitude > 80 ? Math.log2(1 + (magnitude / 80)) * 0.65 : 0;
-  rail.scrollLeft += horizontalDelta * (1 + burstAcceleration + gestureAcceleration);
+  rail.scrollLeft = Math.max(0, Math.min(maxScroll, rail.scrollLeft + horizontalDelta * (1 + burstAcceleration + gestureAcceleration)));
   rememberVisionRailScroll(rail);
   scheduleVisionRailFocus(rail);
 }, { passive: false });
@@ -4008,12 +4587,28 @@ window.addEventListener("beforeunload", saveConsoleScrollState, { passive: true 
 window.addEventListener("beforeunload", saveConsoleUiState, { passive: true });
 dialog?.addEventListener("close", () => {
   closeLanguageTipsMenus();
-  if (editingJobId) {
-    contextEditorDrafts.delete(scopeDraftKey("main", editingJobId));
-    contextLanguageTipsDrafts.delete(editingJobId);
-  }
+  const preservedDraft = Boolean(editingJobId && (
+    contextEditorDrafts.has(scopeDraftKey("main", editingJobId))
+    || contextLanguageTipsDrafts.has(editingJobId)
+  ));
   editingJobId = null;
   scheduleConsoleUiSave();
+  if (preservedDraft) showConsoleToast("Unsaved context draft preserved. Reopen Edit Context to continue.", "warning");
+});
+confirmDialogSubmit?.addEventListener("click", () => settleConfirmation(true));
+confirmDialogCancel?.addEventListener("click", () => settleConfirmation(false));
+confirmDialog?.addEventListener("click", event => {
+  if (event.target === confirmDialog && confirmDialog.open) settleConfirmation(false);
+});
+confirmDialog?.addEventListener("cancel", event => {
+  event.preventDefault();
+  settleConfirmation(false);
+});
+confirmDialog?.addEventListener("close", () => {
+  if (!pendingConfirmationResolve) return;
+  const resolve = pendingConfirmationResolve;
+  pendingConfirmationResolve = null;
+  resolve(confirmDialog.returnValue === "confirm");
 });
 for (const dismissibleDialog of [dialog, detailDialog, visionEvidenceDialog, logDialog, reviewDialog, snapshotDialog]) {
   dismissibleDialog?.addEventListener("click", (event) => {
@@ -4021,6 +4616,12 @@ for (const dismissibleDialog of [dialog, detailDialog, visionEvidenceDialog, log
       dismissibleDialog.close();
     }
   });
+  dismissibleDialog?.querySelector("form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+  });
+  for (const closeButton of dismissibleDialog?.querySelectorAll("[data-dialog-close]") || []) {
+    closeButton.addEventListener("click", () => dismissibleDialog.close("cancel"));
+  }
 }
 fileInput.addEventListener("change", acceptSelectedSourceFile);
 translatedFileInput.addEventListener("change", updateSelectedTranslatedFileLabel);
@@ -4036,13 +4637,24 @@ visionEvidenceDialog?.addEventListener("close", () => {
   openVisionEvidenceFrameId = null;
 });
 document.addEventListener("keydown", (event) => {
-  if (!visionEvidenceDialog?.open) return;
-  if (event.key === "ArrowLeft") {
+  if (visionEvidenceDialog?.open && event.key === "ArrowLeft") {
     event.preventDefault();
     navigateVisionEvidence(-1);
-  } else if (event.key === "ArrowRight") {
+  } else if (visionEvidenceDialog?.open && event.key === "ArrowRight") {
     event.preventDefault();
     navigateVisionEvidence(1);
+  } else if (
+    event.key === "/"
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+    && !(event.target instanceof HTMLInputElement)
+    && !(event.target instanceof HTMLTextAreaElement)
+    && !(event.target instanceof HTMLSelectElement)
+    && !document.querySelector("dialog[open]")
+  ) {
+    event.preventDefault();
+    jobsSearchEl?.focus();
   }
 });
 adaptiveVisionInput?.addEventListener("change", () => {
@@ -4090,6 +4702,8 @@ document.addEventListener("toggle", (event) => {
   if (auxiliaryJobId) {
     if (target.open) collapsedJobAuxiliary.delete(auxiliaryJobId);
     else collapsedJobAuxiliary.add(auxiliaryJobId);
+    updateJobsToolbar(currentJobs, filterJobs(currentJobs));
+    scheduleConsoleUiSave();
   }
   const activeContextJobId = target.dataset.activeContext;
   if (activeContextJobId) {
@@ -4120,11 +4734,22 @@ async function initializeApp() {
   requestAnimationFrame(() => {
     document.body.classList.add("page-ready");
   });
-  await fetchModelList();
   await fetchJobs();
+  void fetchModelList();
   requestAnimationFrame(() => restoreConsoleScrollState());
-  setInterval(fetchJobs, 2500);
+  setInterval(() => {
+    if (!document.hidden) void fetchJobs({ periodic: true });
+  }, 2500);
   setInterval(updateLiveTimeoutDisplays, 1000);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    jobsFetchController?.abort();
+    setJobsSyncStatus("Paused in background", "paused");
+  } else {
+    void fetchJobs({ force: true });
+  }
+});
 
 void initializeApp();

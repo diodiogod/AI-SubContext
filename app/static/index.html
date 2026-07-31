@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-5" />
+    <link rel="stylesheet" href="/static/app.css?v=20260731-ux-lab-3" />
   </head>
   <body class="console-page">
     <main class="shell console-shell">
@@ -43,7 +43,7 @@
               <div><div class="mini-eyebrow">Source</div><h3>Choose the subtitle to work on</h3></div>
             </div>
             <label id="drop-zone" class="drop-zone" for="file">
-              <input type="file" id="file" accept=".srt" required hidden />
+              <input type="file" id="file" class="visually-hidden-file" accept=".srt" required />
               <div class="drop-title">Drop an <code>.srt</code> here</div>
               <div class="drop-subtitle">or click to browse</div>
               <div id="selected-file" class="selected-file">No file selected</div>
@@ -54,7 +54,7 @@
               for="translated_file"
               title="Optional. Load an already translated subtitle to run validation and review without retranslating the whole file."
             >
-              <input type="file" id="translated_file" accept=".srt" hidden />
+              <input type="file" id="translated_file" class="visually-hidden-file" accept=".srt" />
               <span class="secondary-file-label">Translated File for Review</span>
               <span id="selected-translated-file" class="secondary-file-value">Optional second <code>.srt</code></span>
             </label>
@@ -71,6 +71,7 @@
                 <input
                   type="text"
                   id="local_video_path"
+                  aria-label="Local source video path"
                   data-transient="true"
                   placeholder="Choose a local video or paste its full path"
                   autocomplete="off"
@@ -94,7 +95,7 @@
                 for="video_file"
                 title="Compatibility fallback. Uploads and stores a separate workspace copy of the video."
               >
-                <input type="file" id="video_file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" hidden />
+                <input type="file" id="video_file" class="visually-hidden-file" accept="video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts" />
                 <span class="secondary-file-label">Upload a Copy Instead</span>
                 <span id="selected-video-file" class="secondary-file-value">Fallback for remote setups; this duplicates the video.</span>
               </label>
@@ -145,6 +146,7 @@
                     <input
                       type="text"
                       id="target_language_tips"
+                      aria-label="Target language tips"
                       data-tips-input="setup"
                       placeholder="Optional language-specific tips for the model"
                     />
@@ -194,7 +196,7 @@
                       Load
                     </button>
                   </div>
-                  <select id="model-select">
+                  <select id="model-select" aria-label="Available LM Studio models">
                     <option value="">Load models to choose one</option>
                   </select>
                   <div id="model-list-status" class="job-meta model-status"></div>
@@ -361,18 +363,52 @@
             <button id="refresh-btn" class="ghost">Refresh</button>
           </div>
         </div>
+        <div class="jobs-toolbar" aria-label="Find saved jobs">
+          <label class="jobs-search-box">
+            <span class="sr-only">Search saved jobs</span>
+            <input id="jobs-search" type="search" placeholder="Search title, filename, model, or language" autocomplete="off" />
+            <kbd>/</kbd>
+          </label>
+          <div class="jobs-filter-rail" role="group" aria-label="Filter jobs by status">
+            <button type="button" class="is-active" data-jobs-filter="all" aria-pressed="true">All <span data-jobs-filter-count="all">0</span></button>
+            <button type="button" data-jobs-filter="active" aria-pressed="false">Active <span data-jobs-filter-count="active">0</span></button>
+            <button type="button" data-jobs-filter="completed" aria-pressed="false">Completed <span data-jobs-filter-count="completed">0</span></button>
+            <button type="button" data-jobs-filter="attention" aria-pressed="false">Attention <span data-jobs-filter-count="attention">0</span></button>
+          </div>
+          <button type="button" id="jobs-evidence-toggle" class="ghost jobs-evidence-toggle">Collapse evidence</button>
+        </div>
+        <div class="jobs-results-row">
+          <div id="jobs-result-summary" class="job-meta" role="status" aria-live="polite"></div>
+          <div id="jobs-sync-status" class="jobs-sync-status" role="status" aria-live="polite">Live</div>
+        </div>
         <div id="jobs"></div>
       </section>
     </main>
 
-    <dialog id="context-dialog">
+    <div id="console-toast" class="workspace-toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
+      <div class="dialog-form confirm-dialog-form">
+        <div class="confirm-dialog-copy">
+          <div class="mini-eyebrow">Please confirm</div>
+          <h2 id="confirm-dialog-title">Confirm action</h2>
+          <p id="confirm-dialog-message"></p>
+        </div>
+        <div class="actions confirm-dialog-actions">
+          <button type="button" id="confirm-dialog-cancel" class="ghost">Cancel</button>
+          <button type="button" id="confirm-dialog-submit" class="danger">Continue</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="context-dialog" aria-labelledby="context-dialog-title">
       <form method="dialog" class="dialog-form snapshot-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Context Editor</div>
             <h2 id="context-dialog-title">Edit Context</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="context-dialog-body" class="snapshot-dialog-body"></div>
         <div class="actions">
@@ -382,20 +418,20 @@
       </form>
     </dialog>
 
-    <dialog id="detail-dialog">
+    <dialog id="detail-dialog" aria-labelledby="detail-dialog-title">
       <form method="dialog" class="dialog-form detail-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Context Details</div>
             <h2 id="detail-dialog-title">Details</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="detail-dialog-body" class="detail-dialog-body"></div>
       </form>
     </dialog>
 
-    <dialog id="vision-evidence-dialog">
+    <dialog id="vision-evidence-dialog" aria-labelledby="vision-evidence-dialog-title">
       <form method="dialog" class="dialog-form vision-evidence-dialog-form">
         <div class="panel-head">
           <div>
@@ -405,47 +441,47 @@
           <div class="actions">
             <button type="button" id="vision-evidence-prev" class="ghost">Previous</button>
             <button type="button" id="vision-evidence-next" class="ghost">Next</button>
-            <button value="cancel" class="ghost">Close</button>
+            <button type="button" data-dialog-close class="ghost">Close</button>
           </div>
         </div>
         <div id="vision-evidence-dialog-body" class="vision-evidence-dialog-body"></div>
       </form>
     </dialog>
 
-    <dialog id="log-dialog">
+    <dialog id="log-dialog" aria-labelledby="log-dialog-title">
       <form method="dialog" class="dialog-form detail-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Verbose Log</div>
             <h2 id="log-dialog-title">Job Log</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="log-dialog-body" class="log-dialog-body"></div>
       </form>
     </dialog>
 
-    <dialog id="review-dialog">
+    <dialog id="review-dialog" aria-labelledby="review-dialog-title">
       <form method="dialog" class="dialog-form review-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Line Review</div>
             <h2 id="review-dialog-title">Review Lines</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="review-dialog-body" class="review-dialog-body"></div>
       </form>
     </dialog>
 
-    <dialog id="snapshot-dialog">
+    <dialog id="snapshot-dialog" aria-labelledby="snapshot-dialog-title">
       <form method="dialog" class="dialog-form snapshot-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Batch Snapshot</div>
             <h2 id="snapshot-dialog-title">Batch Card</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="snapshot-dialog-body" class="snapshot-dialog-body"></div>
         <div class="actions">
@@ -455,6 +491,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260720-overhaul-5"></script>
+    <script src="/static/app.js?v=20260731-ux-lab-3"></script>
   </body>
 </html>

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-5" />
+    <link rel="stylesheet" href="/static/app.css?v=20260731-ux-lab-3" />
   </head>
   <body class="tool-page review-page">
     <main class="shell review-shell tool-shell">
@@ -22,6 +22,7 @@
             <div id="review-page-meta" class="job-meta">Loading job...</div>
           </div>
           <div class="actions">
+            <div id="review-sync-status" class="workspace-sync-status" role="status" aria-live="polite">Live</div>
             <a class="ghost link-button" href="/">Console</a>
             <button type="button" id="review-page-refresh" class="ghost">Refresh</button>
           </div>
@@ -34,11 +35,12 @@
             </div>
             <div class="progress"><div id="review-progress-bar" class="progress-bar" style="width:0%"></div></div>
           </div>
-          <div class="review-filter-row" id="review-page-filters"></div>
+          <div class="review-filter-row" id="review-page-filters" role="group" aria-label="Filter subtitle lines"></div>
           <div class="review-toolbar-actions">
             <label class="review-search-box">
               <span class="sr-only">Search subtitles</span>
-              <input id="review-search" type="search" placeholder="Search source, translation, status, reason, or reference" />
+              <input id="review-search" type="search" placeholder="Search source, translation, status, reason, or reference" aria-keyshortcuts="/" />
+              <kbd>/</kbd>
             </label>
             <button type="button" id="review-prev-flagged" class="ghost">Prev Flagged</button>
             <button type="button" id="review-next-flagged" class="ghost">Next Flagged</button>
@@ -56,17 +58,28 @@
       <section class="review-layout">
         <section class="panel review-table-panel">
           <div class="review-table-headbar">
-            <div id="review-table-summary" class="job-meta"></div>
-            <details class="review-column-menu">
-              <summary>Columns</summary>
-              <div class="review-column-menu-body">
-                <div id="review-column-controls" class="review-column-controls"></div>
-                <button type="button" id="review-column-reset" class="ghost">Reset layout</button>
+            <div id="review-table-summary" class="job-meta" role="status" aria-live="polite"></div>
+            <div class="review-table-tools">
+              <label class="review-jump-control">
+                <span>Line</span>
+                <input id="review-jump-line" type="number" min="1" inputmode="numeric" placeholder="#" aria-label="Jump to subtitle line" />
+              </label>
+              <div class="review-density-control" role="group" aria-label="Subtitle row density">
+                <button type="button" data-review-density="compact" aria-pressed="false">Compact</button>
+                <button type="button" data-review-density="comfortable" aria-pressed="true">Comfortable</button>
               </div>
-            </details>
+              <details class="review-column-menu">
+                <summary>Columns</summary>
+                <div class="review-column-menu-body">
+                  <div id="review-column-controls" class="review-column-controls"></div>
+                  <button type="button" id="review-column-reset" class="ghost">Reset layout</button>
+                </div>
+              </details>
+            </div>
           </div>
           <div class="review-table-wrap">
             <table class="review-table">
+              <caption class="sr-only">Source and translated subtitle lines. Use Up and Down arrows to move between rows and Enter to open the selected line.</caption>
               <colgroup id="review-table-columns"></colgroup>
               <thead>
                 <tr id="review-table-header"></tr>
@@ -78,7 +91,7 @@
           </div>
         </section>
 
-        <aside class="panel review-side-panel">
+        <aside class="panel review-side-panel" aria-label="Selected subtitle line editor">
           <div id="review-side-body" class="review-side-body">
             <p class="job-meta">Select a line to review it here.</p>
           </div>
@@ -86,14 +99,30 @@
       </section>
     </main>
 
-    <dialog id="review-snapshot-dialog">
+    <div id="review-toast" class="workspace-toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog id="review-confirm-dialog" class="confirm-dialog" aria-labelledby="review-confirm-title" aria-describedby="review-confirm-message">
+      <div class="dialog-form confirm-dialog-form">
+        <div class="confirm-dialog-copy">
+          <div class="mini-eyebrow">Please confirm</div>
+          <h2 id="review-confirm-title">Confirm action</h2>
+          <p id="review-confirm-message"></p>
+        </div>
+        <div class="actions confirm-dialog-actions">
+          <button type="button" id="review-confirm-cancel" class="ghost">Cancel</button>
+          <button type="button" id="review-confirm-submit" class="danger">Continue</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="review-snapshot-dialog" aria-labelledby="review-snapshot-title">
       <form method="dialog" class="dialog-form snapshot-dialog-form">
         <div class="panel-head">
           <div>
             <div class="mini-eyebrow">Batch Card</div>
             <h2 id="review-snapshot-title">Batch Card</h2>
           </div>
-          <button value="cancel" class="ghost">Close</button>
+          <button type="button" data-dialog-close class="ghost">Close</button>
         </div>
         <div id="review-snapshot-body" class="snapshot-dialog-body"></div>
         <div class="actions">
@@ -103,6 +132,6 @@
       </form>
     </dialog>
 
-    <script src="/static/review.js?v=20260720-overhaul-4"></script>
+    <script src="/static/review.js?v=20260731-ux-lab-3"></script>
   </body>
   </html>

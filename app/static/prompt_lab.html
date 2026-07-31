@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/app.css?v=20260720-overhaul-5" />
+    <link rel="stylesheet" href="/static/app.css?v=20260731-ux-lab-3" />
   </head>
   <body class="tool-page prompt-lab-page">
     <main class="shell review-shell tool-shell">
@@ -24,6 +24,7 @@
             </div>
           </div>
           <div class="actions">
+            <div id="prompt-lab-status" class="prompt-lab-save-state" role="status" aria-live="polite">Loading prompt defaults...</div>
             <a class="ghost link-button" href="/">Console</a>
             <button type="button" id="prompt-lab-reset" class="ghost">Reset to Defaults</button>
             <button type="button" id="prompt-lab-save">Save Changes</button>
@@ -46,7 +47,7 @@
           <div class="field-grid field-grid-controls">
             <label>
               <span class="label-row">Max Output Tokens <span class="info-dot" title="Hard cap for one model response. Lower prevents runaway answers and overthinking. Higher gives the model more room, but increases the chance of giant malformed JSON or long stalls.">?</span></span>
-              <input type="number" id="max_completion_tokens" min="128" max="16000" step="64" />
+              <input type="number" id="max_completion_tokens" min="128" max="16000" step="1" />
             </label>
             <label>
               <span class="label-row">Request Timeout (s) <span class="info-dot" title="How long one model request may run before the app stops waiting. Local model servers may keep generating after the app times out, so cancel the old generation if retries stall. Increase this for slower local models.">?</span></span>
@@ -117,11 +118,8 @@
         </section>
       </form>
 
-      <section class="panel">
-        <div id="prompt-lab-status" class="job-meta">Loading prompt defaults...</div>
-      </section>
     </main>
 
-    <script src="/static/prompt_lab.js?v=20260628-2"></script>
+    <script src="/static/prompt_lab.js?v=20260731-ux-lab-3"></script>
   </body>
   </html>

@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from app.models import (
     RetranslateLineRequest,
     RuntimeDefaultsResponse,
     SessionContext,
+    TranslationJob,
     UpdateBatchContextSnapshotRequest,
     UpdateTranslatedLineRequest,
     UpdateContextRequest,
@@ -128,15 +130,246 @@ if ($selected) {
 app = FastAPI(title="AI SubContext", version=__version__)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_loopback_browser_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+@app.middleware("http")
+async def reject_foreign_browser_api_requests(request: Request, call_next):
+    """Keep browser pages outside loopback from reading or mutating the local app."""
+    if request.url.path.startswith("/api/"):
+        browser_source = request.headers.get("origin") or request.headers.get("referer")
+        if browser_source and not _is_loopback_browser_url(browser_source):
+            return JSONResponse(status_code=403, content={"detail": "Browser origin is not allowed"})
+    return await call_next(request)
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def _job_payload(job) -> dict:
     return job.model_dump(mode="json", exclude={"video_path"})
+
+
+_SUMMARY_SETTING_FIELDS = {
+    "model",
+    "source_language",
+    "target_language",
+    "batch_size",
+    "structured_context",
+    "visual_scene_context",
+    "adaptive_vision",
+    "request_timeout_seconds",
+}
+_REVIEW_SETTING_FIELDS = {
+    "model",
+    "source_language",
+    "target_language",
+    "batch_size",
+}
+_SUMMARY_JOB_FIELDS = {
+    "id",
+    "filename",
+    "source_filename",
+    "title",
+    "job_kind",
+    "video_filename",
+    "video_managed",
+    "validation_stats",
+    "vision_stats",
+    "status",
+    "progress",
+    "eta_seconds",
+    "estimated_completion_at",
+    "message",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "error",
+    "current_batch",
+    "total_batches",
+    "active_batch_index",
+    "active_batch_positions",
+    "active_recovery_positions",
+    "pause_requested",
+    "stop_requested",
+}
+_REVIEW_JOB_FIELDS = {
+    "id",
+    "filename",
+    "source_filename",
+    "title",
+    "job_kind",
+    "original_lines",
+    "translated_lines",
+    "reference_tracks",
+    "session_context",
+    "validation_stats",
+    "pending_retranslations",
+    "status",
+    "progress",
+    "current_batch",
+    "total_batches",
+    "active_batch_index",
+    "active_batch_positions",
+    "active_recovery_positions",
+    "message",
+}
+
+
+def _job_summary_payload(job: TranslationJob) -> dict:
+    """Return only the live console card and visual-timeline data for a job."""
+    payload = job.model_dump(mode="json", include=_SUMMARY_JOB_FIELDS)
+    payload["settings"] = job.settings.model_dump(
+        mode="json",
+        include=_SUMMARY_SETTING_FIELDS,
+    )
+    status_value = job.status.value
+    if status_value in {"queued", "processing", "paused"}:
+        payload["session_context"] = (
+            job.session_context.model_dump(mode="json") if job.session_context else None
+        )
+        payload["session_context_history"] = [
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            for item in job.session_context_history[:2]
+        ]
+    payload["reference_tracks"] = [
+        track.model_dump(
+            mode="json",
+            include={
+                "filename",
+                "language",
+                "total_lines",
+                "matched_lines",
+                "average_confidence",
+                "alignment_mode",
+            },
+        )
+        for track in job.reference_tracks
+    ]
+    payload["visual_frames"] = [
+        frame.model_dump(
+            mode="json",
+            include={
+                "id",
+                "batch_index",
+                "timestamp_ms",
+                "related_positions",
+                "categories",
+                "revised_positions",
+                "status",
+            },
+        )
+        for frame in job.visual_frames[-80:]
+    ]
+    activity_needles = (
+        "Starting batch ",
+        "Submitting batch to model",
+        "Retrying batch with stricter translation instruction",
+        "Validation after attempt",
+        "Model request timed out after",
+    )
+    model_activity_logs = []
+    if status_value in {"processing", "paused", "failed"}:
+        for entry in reversed(job.logs):
+            if not any(needle in entry.message for needle in activity_needles):
+                continue
+            model_activity_logs.append(entry.model_dump(mode="json"))
+            if len(model_activity_logs) == 12:
+                break
+        model_activity_logs.reverse()
+    review_counts = {
+        "suspect": 0,
+        "error": 0,
+        "auto_fixed": 0,
+        "manual_fixed": 0,
+    }
+    for issue in job.validation_issues:
+        if issue.status in review_counts:
+            review_counts[issue.status] += 1
+    review_counts["fixed"] = review_counts["auto_fixed"] + review_counts["manual_fixed"]
+    payload.update(
+        source_count=len(job.original_lines),
+        translated_count=len(job.translated_lines),
+        log_count=len(job.logs),
+        issue_count=len(job.validation_issues),
+        pending_retranslation_count=len(job.pending_retranslations),
+        reference_track_count=len(job.reference_tracks),
+        visual_frame_count=len(job.visual_frames),
+        visual_observation_count=len(job.visual_observations),
+        visual_scene_count=len(job.visual_scene_contexts),
+        batch_context_snapshot_count=len(job.batch_context_snapshots),
+        latest_log=job.logs[-1].model_dump(mode="json") if job.logs else None,
+        model_activity_logs=model_activity_logs,
+        review_counts=review_counts,
+    )
+    return payload
+
+
+def _job_review_payload(job: TranslationJob) -> dict:
+    """Return the subtitle and context data used by the Review Workspace."""
+    payload = job.model_dump(mode="json", include=_REVIEW_JOB_FIELDS)
+    payload["settings"] = job.settings.model_dump(
+        mode="json",
+        include=_REVIEW_SETTING_FIELDS,
+    )
+    # Historical cards can outweigh the subtitle text several times over. The
+    # workspace only displays one card at a time, so poll with metadata and load
+    # the selected card from the dedicated endpoint below.
+    payload["batch_context_snapshots"] = [
+        snapshot.model_dump(
+            mode="json",
+            include={"batch_index", "start_position", "end_position", "created_at"},
+        )
+        | {"has_snapshot": True}
+        for snapshot in job.batch_context_snapshots
+    ]
+    payload["validation_issues"] = [
+        issue.model_dump(
+            mode="json",
+            include={"position", "status", "reason_codes", "notes", "batch_index"},
+        )
+        for issue in job.validation_issues
+    ]
+    return payload
+
+
+def _batch_context_payload(job: TranslationJob, batch_index: int) -> dict | None:
+    session_context = job.session_context.model_dump(mode="json") if job.session_context else None
+    snapshot = next(
+        (item for item in job.batch_context_snapshots if item.batch_index == batch_index),
+        None,
+    )
+    if snapshot is not None:
+        return snapshot.model_dump(mode="json") | {
+            "has_snapshot": True,
+            "session_context": session_context,
+        }
+
+    batch_size = max(1, int(job.settings.batch_size or 1))
+    start = (batch_index - 1) * batch_size
+    batch_lines = job.original_lines[start:start + batch_size]
+    if batch_index < 1 or not batch_lines:
+        return None
+    return {
+        "batch_index": batch_index,
+        "start_position": batch_lines[0].position,
+        "end_position": batch_lines[-1].position,
+        "input_context": None,
+        "output_context": None,
+        "has_snapshot": False,
+        "session_context": session_context,
+    }
 
 
 @app.get("/")
@@ -165,16 +398,17 @@ async def runtime_defaults() -> RuntimeDefaultsResponse:
 
 
 @app.get("/api/jobs")
-async def list_jobs() -> list[dict]:
-    return [_job_payload(job) for job in job_manager.list_jobs()]
+async def list_jobs(view: Literal["full", "summary"] = "full") -> list[dict]:
+    payload_builder = _job_summary_payload if view == "summary" else _job_payload
+    return [payload_builder(job) for job in job_manager.list_jobs()]
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str) -> dict:
+async def get_job(job_id: str, view: Literal["full", "review"] = "full") -> dict:
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _job_payload(job)
+    return _job_review_payload(job) if view == "review" else _job_payload(job)
 
 
 @app.get("/api/jobs/{job_id}/reload", response_model=ReloadJobResponse)
@@ -660,7 +894,12 @@ async def generate_job_context(job_id: str) -> GenerateContextResponse:
 
 
 @app.patch("/api/jobs/{job_id}/batch-context/{batch_index}")
-async def update_batch_context_snapshot(job_id: str, batch_index: int, request: UpdateBatchContextSnapshotRequest) -> dict:
+async def update_batch_context_snapshot(
+    job_id: str,
+    batch_index: int,
+    request: UpdateBatchContextSnapshotRequest,
+    view: Literal["full", "review"] = "full",
+) -> dict:
     try:
         context = SessionContext(**request.session_context)
     except ValidationError as exc:
@@ -668,7 +907,18 @@ async def update_batch_context_snapshot(job_id: str, batch_index: int, request: 
     job = job_manager.update_batch_context_snapshot(job_id, batch_index, context)
     if not job:
         raise HTTPException(status_code=404, detail="Batch context snapshot not found")
-    return _job_payload(job)
+    return _job_review_payload(job) if view == "review" else _job_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/batch-context/{batch_index}")
+async def get_batch_context_snapshot(job_id: str, batch_index: int) -> dict:
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    payload = _batch_context_payload(job, batch_index)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Batch context snapshot not found")
+    return payload
 
 
 @app.post("/api/jobs/{job_id}/batch-context/{batch_index}/generate", response_model=GenerateContextResponse)
@@ -683,15 +933,25 @@ async def generate_batch_context_snapshot(job_id: str, batch_index: int) -> Gene
 
 
 @app.patch("/api/jobs/{job_id}/lines/{position}")
-async def update_translated_line(job_id: str, position: int, request: UpdateTranslatedLineRequest) -> dict:
+async def update_translated_line(
+    job_id: str,
+    position: int,
+    request: UpdateTranslatedLineRequest,
+    view: Literal["full", "review"] = "full",
+) -> dict:
     job = job_manager.update_translated_line(job_id, position, request.text, request.resolution_mode)
     if not job:
         raise HTTPException(status_code=404, detail="Translated subtitle line not found")
-    return _job_payload(job)
+    return _job_review_payload(job) if view == "review" else _job_payload(job)
 
 
 @app.post("/api/jobs/{job_id}/lines/{position}/retranslate")
-async def retranslate_line(job_id: str, position: int, request: RetranslateLineRequest) -> dict:
+async def retranslate_line(
+    job_id: str,
+    position: int,
+    request: RetranslateLineRequest,
+    view: Literal["full", "review"] = "full",
+) -> dict:
     result = await job_manager.request_line_retranslation(job_id, position, request.extra_instruction)
     if not result:
         raise HTTPException(status_code=404, detail="Translated subtitle line not found")
@@ -703,7 +963,7 @@ async def retranslate_line(job_id: str, position: int, request: RetranslateLineR
             if queued
             else f"Retranslation finished for line {position + 1}"
         ),
-        "job": _job_payload(job),
+        "job": _job_review_payload(job) if view == "review" else _job_payload(job),
     }
 
 
