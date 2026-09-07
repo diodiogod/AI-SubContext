@@ -19,6 +19,7 @@ from app.translator import (
     _extract_json_blob,
     _translation_item_text,
     _translation_items,
+    _single_translation_text,
     _validate_translated_batch,
 )
 
@@ -94,6 +95,21 @@ class SubtitleFormattingTests(unittest.TestCase):
         self.assertEqual(
             _translation_item_text({"position": 4, "translated_text": "Olá."}),
             "Olá.",
+        )
+
+    def test_single_revision_accepts_top_level_translation_alias(self) -> None:
+        self.assertEqual(
+            _single_translation_text({"translation": "Tradução corrigida"}, 439),
+            "Tradução corrigida",
+        )
+
+    def test_single_revision_accepts_collection_wrapper(self) -> None:
+        self.assertEqual(
+            _single_translation_text(
+                {"lines": [{"translation": "Tradução corrigida"}]},
+                439,
+            ),
+            "Tradução corrigida",
         )
 
     def test_translation_collection_accepts_prompt_only_lines_alias(self) -> None:

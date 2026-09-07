@@ -617,6 +617,17 @@ def _translation_items(
     return []
 
 
+def _single_translation_text(data: dict[str, Any], position: int) -> str:
+    """Read a single revision from top-level or collection-shaped model JSON."""
+    direct = _translation_item_text(data)
+    if direct:
+        return direct
+    items = _translation_items(data, [position])
+    if len(items) == 1 and isinstance(items[0], dict):
+        return _translation_item_text(items[0])
+    return ""
+
+
 def _clean_subtitle_block_text(value: str) -> str:
     parts = [
         " ".join(part.split())
@@ -2748,9 +2759,17 @@ class OpenAICompatibleTranslator:
             _single_line_revision_schema(),
             log_event=log_event,
         )
+        revised_text = _single_translation_text(data, source_line.position)
+        if not revised_text:
+            # A malformed prompt-only response must never erase a usable line.
+            revised_text = current_translation.text if current_translation else ""
         revised_line = SubtitleLine(
             position=source_line.position,
-            text=restore_subtitle_formatting(source_line.text, str(data.get("text", ""))),
+            text=(
+                restore_subtitle_formatting(source_line.text, revised_text)
+                if revised_text != (current_translation.text if current_translation else "")
+                else revised_text
+            ),
         )
         validation = _validate_translated_batch(settings, [source_line], [revised_line], session_context)
         flagged_positions = _flagged_positions(validation, [source_line], settings)
@@ -3013,11 +3032,15 @@ class OpenAICompatibleTranslator:
             _single_line_revision_schema(),
             log_event=log_event,
         )
+        revised_text = _single_translation_text(data, source_line.position)
+        if not revised_text:
+            revised_text = current_translation.text if current_translation else ""
         return SubtitleLine(
             position=source_line.position,
-            text=restore_subtitle_formatting(
-                source_line.text,
-                str(data.get("text") or "").strip(),
+            text=(
+                restore_subtitle_formatting(source_line.text, revised_text)
+                if revised_text != (current_translation.text if current_translation else "")
+                else revised_text
             ),
         )
 
