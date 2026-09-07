@@ -15,6 +15,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from json_repair import repair_json
 
 from app.config import (
     DEFAULT_MAX_COMPLETION_TOKENS,
@@ -539,6 +540,23 @@ def _extract_json_blob(text: str) -> dict[str, Any]:
     try:
         return json.loads(blob)
     except json.JSONDecodeError as exc:
+        try:
+            # A common prompt-only failure drops the `text` key and leaves two
+            # adjacent quotes after `position`: `..., ""translated text"}`.
+            repair_candidate = re.sub(
+                r'("position"\s*:\s*-?\d+\s*,\s*)""((?:\\.|[^"\\])*)"',
+                r'\1"text": "\2"',
+                blob,
+            )
+            repaired = repair_json(
+                repair_candidate,
+                return_objects=True,
+                skip_json_loads=True,
+            )
+            if isinstance(repaired, dict) and repaired:
+                return repaired
+        except Exception:
+            pass
         line = int(getattr(exc, "lineno", 0) or 0)
         column = int(getattr(exc, "colno", 0) or 0)
         context_line = ""
@@ -555,6 +573,48 @@ def _extract_json_blob(text: str) -> dict[str, Any]:
         if context_line:
             message += f" Near: {context_line}"
         raise ValueError(message) from exc
+
+
+def _translation_item_text(item: dict[str, Any]) -> str:
+    for key in ("text", "translation", "translated_text", "translated", "value", ""):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    candidates = [
+        value
+        for key, value in item.items()
+        if key != "position" and isinstance(value, str) and value.strip()
+    ]
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _translation_items(
+    data: dict[str, Any],
+    expected_positions: list[int] | None = None,
+) -> list[Any]:
+    """Accept the required key plus common prompt-only JSON aliases.
+
+    Servers with schema enforcement always return ``translations``. Prompt-only
+    servers can preserve the requested item shape but rename the surrounding
+    collection to ``lines`` or ``items``; rejecting those entries would discard
+    otherwise complete, correctly positioned translations.
+    """
+    for key in ("translations", "lines", "items"):
+        value = data.get(key)
+        if isinstance(value, list):
+            if expected_positions is None or len(value) != len(expected_positions):
+                return value
+
+            normalized: list[Any] = []
+            for position, item in zip(expected_positions, value, strict=True):
+                if isinstance(item, str):
+                    normalized.append({"position": position, "text": item})
+                elif isinstance(item, dict) and "position" not in item:
+                    normalized.append({"position": position, **item})
+                else:
+                    normalized.append(item)
+            return normalized
+    return []
 
 
 def _clean_subtitle_block_text(value: str) -> str:
@@ -1072,6 +1132,36 @@ def _visual_scene_context_schema() -> dict[str, Any]:
     }
 
 
+def _compact_visual_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            text = _compact_visual_text(item)
+            if text:
+                parts.append(f"{str(key).replace('_', ' ')}: {text}")
+        return "; ".join(parts)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(text for item in value if (text := _compact_visual_text(item)))
+    return str(value).strip()
+
+
+def _normalize_visual_scene_context_data(data: dict[str, Any]) -> dict[str, Any]:
+    schema = _visual_scene_context_schema()
+    normalized: dict[str, Any] = {}
+    for key, field_schema in schema["properties"].items():
+        value = data.get(key, [] if field_schema.get("type") == "array" else "")
+        if field_schema.get("type") == "array":
+            items = value if isinstance(value, (list, tuple)) else [value]
+            normalized[key] = [text for item in items if (text := _compact_visual_text(item))]
+        else:
+            normalized[key] = _compact_visual_text(value)
+    return normalized
+
+
 def _single_line_revision_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -1213,6 +1303,18 @@ def _looks_like_unchanged_proper_name(
     return False
 
 
+def _looks_like_language_neutral_vocalization(value: str) -> bool:
+    normalized = _normalize_text(value).casefold()
+    vocalization = re.sub(r"[^a-zà-ÿ]+", "", normalized)
+    return bool(
+        vocalization
+        and re.fullmatch(
+            r"(?:m+h+m*|m+|h+m+|u+h+|u+m+|a+h+|o+h+|h+a+h+a+|h+e+h+e+|p+f+|t+sk+)",
+            vocalization,
+        )
+    )
+
+
 def _line_looks_untranslated(
     source_text: str,
     translated_text: str,
@@ -1223,7 +1325,9 @@ def _line_looks_untranslated(
     if not translated:
         return True
     if len(source) >= 8 and source.casefold() == translated.casefold():
-        if _looks_like_unchanged_proper_name(source, translated, session_context):
+        if _looks_like_unchanged_proper_name(source, translated, session_context) or (
+            _looks_like_language_neutral_vocalization(source)
+        ):
             return False
         return True
 
@@ -1241,16 +1345,21 @@ def _line_boundary_markers(text: str) -> dict[str, bool]:
     if not stripped:
         return {
             "leading_dash": False,
-            "starts_with_quote": False,
-            "ends_with_quote": False,
+            "outer_quote": False,
             "ends_with_ellipsis": False,
         }
 
-    quote_chars = "\"'“”‘’«»"
+    quote_pairs = {
+        '"': '"',
+        "'": "'",
+        "“": "”",
+        "‘": "’",
+        "«": "»",
+    }
+    outer_quote = stripped[:1] in quote_pairs and stripped[-1:] == quote_pairs[stripped[:1]]
     return {
         "leading_dash": stripped.startswith(("-", "–", "—")),
-        "starts_with_quote": stripped[:1] in quote_chars,
-        "ends_with_quote": stripped[-1:] in quote_chars,
+        "outer_quote": outer_quote,
         "ends_with_ellipsis": stripped.endswith(("...", "…")),
     }
 
@@ -1265,7 +1374,7 @@ def _boundary_drift_positions(
         translated_markers = _line_boundary_markers(translated.text)
         core_mismatches = sum(
             1
-            for key in ("leading_dash", "starts_with_quote", "ends_with_quote")
+            for key in ("leading_dash", "outer_quote")
             if source_markers[key] != translated_markers[key]
         )
         soft_mismatch = source_markers["ends_with_ellipsis"] != translated_markers["ends_with_ellipsis"]
@@ -1624,7 +1733,10 @@ def _ordered_lines_from_map(batch_lines: list[SubtitleLine], translated_by_posit
 
 class OpenAICompatibleTranslator:
     def __init__(self) -> None:
-        pass
+        # Some OpenAI-compatible servers (notably NInfer) reject response_format
+        # entirely. Remember that capability per endpoint/model so every subtitle
+        # batch does not repeat two doomed requests and the same warning.
+        self._prompt_only_json_endpoints: set[tuple[str, str]] = set()
 
     def runtime_defaults(self) -> dict[str, Any]:
         return {
@@ -1824,7 +1936,8 @@ class OpenAICompatibleTranslator:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
             for url in candidates:
                 try:
-                    request_modes = (
+                    capability_key = (url, settings.model)
+                    structured_request_modes = (
                         (
                             "strict JSON schema",
                             {**base_payload, "response_format": _schema_payload(schema_name, schema)},
@@ -1836,7 +1949,13 @@ class OpenAICompatibleTranslator:
                                 "response_format": _schema_payload(schema_name, schema, strict=False),
                             },
                         ),
-                        ("prompt-only JSON", base_payload),
+                    )
+                    prompt_only_mode = (("prompt-only JSON", base_payload),)
+                    already_prompt_only = capability_key in self._prompt_only_json_endpoints
+                    request_modes = (
+                        prompt_only_mode
+                        if already_prompt_only
+                        else structured_request_modes + prompt_only_mode
                     )
                     for mode_index, (mode_name, request_payload) in enumerate(request_modes):
                         response = await client.post(
@@ -1853,7 +1972,14 @@ class OpenAICompatibleTranslator:
                                 continue
                             response.raise_for_status()
 
-                        level = "info" if mode_index == 0 else "warn"
+                        if mode_name == "prompt-only JSON":
+                            self._prompt_only_json_endpoints.add(capability_key)
+                            # The first fallback is actionable; subsequent calls are
+                            # expected operation for this endpoint and need no warning.
+                            if already_prompt_only:
+                                return _extract_json_blob(_extract_message_text(response.json()))
+
+                        level = "info" if mode_name == "strict JSON schema" else "warn"
                         message = f"Model response mode for {schema_name}: {mode_name}"
                         if log_event:
                             log_event(level, message)
@@ -1986,6 +2112,7 @@ class OpenAICompatibleTranslator:
             _visual_scene_context_schema(),
             log_event=log_event,
         )
+        scene_data = _normalize_visual_scene_context_data(data)
         return VisualSceneContext(
             scene_index=scene_index,
             start_position=scene_lines[0].position,
@@ -1993,7 +2120,7 @@ class OpenAICompatibleTranslator:
             start_time=scene_lines[0].start_time,
             end_time=scene_lines[-1].end_time,
             frame_ids=[frame.id for frame in frames],
-            **data,
+            **scene_data,
         )
 
     async def generate_context_from_full_subtitle(
@@ -2324,10 +2451,16 @@ class OpenAICompatibleTranslator:
         translated_by_position: dict[int, SubtitleLine] = {}
         duplicate_positions: set[int] = set()
         unexpected_positions: set[int] = set()
-        for item in data.get("translations", []):
+        ordered_expected_positions = [line.position for line in batch_lines]
+        for item in _translation_items(data, ordered_expected_positions):
+            if not isinstance(item, dict) or "position" not in item:
+                continue
             position = int(item["position"])
             if position not in expected_positions:
                 unexpected_positions.add(position)
+                continue
+            translated_text = _translation_item_text(item)
+            if not translated_text:
                 continue
             if position in translated_by_position:
                 duplicate_positions.add(position)
@@ -2335,7 +2468,7 @@ class OpenAICompatibleTranslator:
                 position=position,
                 text=restore_subtitle_formatting(
                     source_by_position[position].text,
-                    str(item["text"]),
+                    translated_text,
                 ),
             )
         for position in duplicate_positions:

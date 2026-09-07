@@ -5,6 +5,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from app.config import TranslationSettings
 from app.models import SubtitleLine
 from app.subtitle_formatting import (
@@ -12,7 +14,13 @@ from app.subtitle_formatting import (
     restore_subtitle_formatting,
     subtitle_formatting_matches,
 )
-from app.translator import OpenAICompatibleTranslator, _validate_translated_batch
+from app.translator import (
+    OpenAICompatibleTranslator,
+    _extract_json_blob,
+    _translation_item_text,
+    _translation_items,
+    _validate_translated_batch,
+)
 
 
 def settings() -> TranslationSettings:
@@ -26,6 +34,116 @@ def settings() -> TranslationSettings:
 
 
 class SubtitleFormattingTests(unittest.TestCase):
+    def test_prompt_only_json_fallback_is_cached_and_warned_once(self) -> None:
+        responses = [
+            httpx.Response(400, text="response_format is unsupported", request=httpx.Request("POST", "http://localhost")),
+            httpx.Response(400, text="response_format is unsupported", request=httpx.Request("POST", "http://localhost")),
+            httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]}),
+            httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]}),
+        ]
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return responses.pop(0)
+
+        events: list[tuple[str, str]] = []
+        translator = OpenAICompatibleTranslator()
+
+        async def run_twice() -> None:
+            for _ in range(2):
+                result = await translator._chat_json(
+                    settings(),
+                    [{"role": "user", "content": "Return JSON"}],
+                    "translation_batch",
+                    {"type": "object"},
+                    lambda level, message: events.append((level, message)),
+                )
+                self.assertTrue(result["ok"])
+
+        with patch("app.translator.httpx.AsyncClient", return_value=FakeClient()):
+            asyncio.run(run_twice())
+
+        self.assertEqual(responses, [])
+        self.assertEqual(
+            events,
+            [("warn", "Model response mode for translation_batch: prompt-only JSON")],
+        )
+
+    def test_malformed_model_json_is_repaired(self) -> None:
+        payload = _extract_json_blob(
+            """```json
+            {"translations": [
+              {"position": 504, ""Sorrindo de um jeito enorme[[SUBBR_0]]como uma torcedora ciborgue"},
+            ]}
+            ```"""
+        )
+
+        self.assertEqual(payload["translations"][0]["position"], 504)
+        self.assertEqual(
+            _translation_item_text(payload["translations"][0]),
+            "Sorrindo de um jeito enorme[[SUBBR_0]]como uma torcedora ciborgue",
+        )
+
+    def test_translation_text_accepts_common_model_aliases(self) -> None:
+        self.assertEqual(
+            _translation_item_text({"position": 4, "translated_text": "Olá."}),
+            "Olá.",
+        )
+
+    def test_translation_collection_accepts_prompt_only_lines_alias(self) -> None:
+        items = [{"position": 56, "text": "Eu... um..."}]
+
+        self.assertIs(_translation_items({"lines": items}), items)
+
+    def test_required_translation_collection_takes_precedence_over_aliases(self) -> None:
+        translations = [{"position": 1, "text": "Correto"}]
+
+        self.assertIs(
+            _translation_items(
+                {
+                    "translations": translations,
+                    "lines": [{"position": 1, "text": "Ignorar"}],
+                }
+            ),
+            translations,
+        )
+
+    def test_complete_ordered_string_collection_recovers_expected_positions(self) -> None:
+        self.assertEqual(
+            _translation_items(
+                {"lines": ["Primeira", "Segunda"]},
+                [80, 81],
+            ),
+            [
+                {"position": 80, "text": "Primeira"},
+                {"position": 81, "text": "Segunda"},
+            ],
+        )
+
+    def test_partial_ordered_string_collection_is_not_positionally_assigned(self) -> None:
+        self.assertEqual(
+            _translation_items({"lines": ["Somente uma"]}, [80, 81]),
+            ["Somente uma"],
+        )
+
+    def test_complete_positionless_objects_recover_expected_positions(self) -> None:
+        self.assertEqual(
+            _translation_items(
+                {"items": [{"text": "Primeira"}, {"translation": "Segunda"}]},
+                [90, 91],
+            ),
+            [
+                {"position": 90, "text": "Primeira"},
+                {"position": 91, "translation": "Segunda"},
+            ],
+        )
+
     def test_multicolor_markup_is_hidden_and_restored_exactly(self) -> None:
         source = (
             '<font color="#ffffff">Hey.</font>'
@@ -142,6 +260,45 @@ class SubtitleValidationTests(unittest.TestCase):
 
         self.assertEqual(result.suspicious_positions, [])
         self.assertFalse(result.failed)
+
+    def test_unchanged_mmm_hmm_is_a_language_neutral_vocalization(self) -> None:
+        source = [SubtitleLine(position=0, text="Mmm-hmm.")]
+        translated = [SubtitleLine(position=0, text="Mmm-hmm.")]
+
+        with patch("app.translator._detect_language_code", return_value="pt"):
+            result = _validate_translated_batch(settings(), source, translated)
+
+        self.assertEqual(result.suspicious_positions, [])
+        self.assertFalse(result.failed)
+
+    def test_leading_contraction_apostrophe_is_not_a_quote_boundary(self) -> None:
+        source = [SubtitleLine(position=169, text="'cause otherwise,\nthis is definitely")]
+        translated = [SubtitleLine(position=169, text="porque, senão,\nisso definitivamente")]
+
+        with patch("app.translator._detect_language_code", return_value="pt"):
+            result = _validate_translated_batch(settings(), source, translated)
+
+        self.assertEqual(result.boundary_positions, [])
+        self.assertFalse(result.failed)
+
+    def test_localized_sentence_final_quote_is_not_a_cue_boundary(self) -> None:
+        source = [SubtitleLine(position=356, text='Good, bad, men, women, "other."')]
+        translated = [SubtitleLine(position=356, text='Boa, ruim, homens, mulheres, "outros".')]
+
+        with patch("app.translator._detect_language_code", return_value="pt"):
+            result = _validate_translated_batch(settings(), source, translated)
+
+        self.assertEqual(result.boundary_positions, [])
+        self.assertFalse(result.failed)
+
+    def test_removed_outer_dialogue_quotes_are_still_flagged(self) -> None:
+        source = [SubtitleLine(position=0, text='"Tell me the truth."')]
+        translated = [SubtitleLine(position=0, text="Diga-me a verdade.")]
+
+        with patch("app.translator._detect_language_code", return_value="pt"):
+            result = _validate_translated_batch(settings(), source, translated)
+
+        self.assertEqual(result.boundary_positions, [0])
 
     def test_malformed_or_changed_multicolor_formatting_is_rejected(self) -> None:
         source = [
