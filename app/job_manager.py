@@ -40,6 +40,7 @@ from app.translator import (
     OpenAICompatibleTranslator,
     TranslationStopRequested,
     _line_looks_untranslated,
+    _looks_like_ambiguous_unchanged_fragment,
     _looks_like_unchanged_proper_name,
     _validate_translated_batch,
 )
@@ -1491,6 +1492,152 @@ class JobManager:
         job.session_context = context
         self._save_state()
 
+    async def _adjudicate_deferred_unchanged(
+        self,
+        job: TranslationJob,
+        *,
+        force: bool = False,
+    ) -> None:
+        translated_by_position = {line.position: line for line in job.translated_lines}
+        source_by_position = {line.position: line for line in job.original_lines}
+        candidates = [
+            issue
+            for issue in job.validation_issues
+            if issue.status == "suspect"
+            and _looks_like_ambiguous_unchanged_fragment(
+                issue.source_text,
+                issue.translated_text,
+                job.session_context,
+            )
+        ]
+        chunk_size = max(1, int(job.settings.batch_size or 1))
+        if len(candidates) < chunk_size and not force:
+            return
+        chunks = [
+            candidates[index:index + chunk_size]
+            for index in range(0, len(candidates), chunk_size)
+        ] if force else [candidates[:chunk_size]]
+
+        for chunk in chunks:
+            payload: list[dict[str, object]] = []
+            for issue in chunk:
+                neighbors = [
+                    {
+                        "position": line.position,
+                        "source_text": line.text,
+                        "current_translation": translated_by_position.get(
+                            line.position,
+                            SubtitleLine(position=line.position, text=""),
+                        ).text,
+                    }
+                    for line in job.original_lines
+                    if 0 < abs(line.position - issue.position) <= 1
+                ]
+                payload.append(
+                    {
+                        "position": issue.position,
+                        "source_text": issue.source_text,
+                        "current_translation": issue.translated_text,
+                        "nearby_lines": neighbors,
+                    }
+                )
+            try:
+                decisions = await self.translator.adjudicate_unchanged_lines(
+                    job.settings,
+                    payload,
+                    job.session_context,
+                    log_event=lambda level, message: self._append_log(
+                        job,
+                        level,
+                        message,
+                        save=False,
+                    ),
+                )
+            except Exception as exc:
+                self._append_log(
+                    job,
+                    "warn",
+                    f"Deferred unchanged-subtitle adjudication failed: {str(exc).strip() or exc.__class__.__name__}",
+                    save=False,
+                )
+                continue
+
+            issues_by_position = {issue.position: issue for issue in job.validation_issues}
+            decided_positions: set[int] = set()
+            for decision in decisions:
+                position = int(decision["position"])
+                issue = issues_by_position.get(position)
+                source_line = source_by_position.get(position)
+                if issue is None or source_line is None or issue not in chunk:
+                    continue
+                decided_positions.add(position)
+                if decision["verdict"] == "valid_unchanged":
+                    job.validation_issues = [
+                        item for item in job.validation_issues if item.position != position
+                    ]
+                    if job.validation_stats.suspicious_subtitles > 0:
+                        job.validation_stats.suspicious_subtitles -= 1
+                    self._append_log(
+                        job,
+                        "info",
+                        f"Deferred adjudication accepted unchanged line {position + 1}",
+                        save=False,
+                    )
+                    continue
+
+                corrected_text = str(decision.get("text") or "").strip()
+                corrected_line = SubtitleLine(
+                    position=position,
+                    text=corrected_text,
+                    start_time=source_line.start_time,
+                    end_time=source_line.end_time,
+                )
+                validation = _validate_translated_batch(
+                    job.settings,
+                    [source_line],
+                    [corrected_line],
+                    job.session_context,
+                )
+                if corrected_text and not validation.suspicious_positions and not validation.failed:
+                    translated_by_position[position] = corrected_line
+                    replacement = SubtitleValidationIssue(
+                        position=position,
+                        status="auto_fixed",
+                        source_text=source_line.text,
+                        translated_text=corrected_text,
+                        reason_codes=["unchanged_adjudication", "retry_fixed"],
+                        notes=["Batched adjudication determined that this unchanged fragment needed translation."],
+                        batch_index=issue.batch_index,
+                    )
+                    job.validation_stats.auto_fixed_subtitles += 1
+                else:
+                    replacement = SubtitleValidationIssue(
+                        position=position,
+                        status="error",
+                        source_text=source_line.text,
+                        translated_text=corrected_text or issue.translated_text,
+                        reason_codes=["unchanged_adjudication", "unchanged_from_source"],
+                        notes=["Batched adjudication requested a translation but did not return one that passed validation."],
+                        batch_index=issue.batch_index,
+                    )
+                    job.validation_stats.error_subtitles += 1
+                self._merge_validation_issues(job, [replacement])
+
+            missing = [issue.position + 1 for issue in chunk if issue.position not in decided_positions]
+            if missing:
+                self._append_log(
+                    job,
+                    "warn",
+                    f"Deferred adjudication omitted line(s) {missing[:8]}; they remain suspect",
+                    save=False,
+                )
+
+        job.translated_lines = [
+            translated_by_position[position]
+            for position in sorted(translated_by_position)
+        ]
+        self._save_state()
+
     async def _run_job(self, job_id: str) -> None:
         job = self.jobs[job_id]
         try:
@@ -1623,6 +1770,11 @@ class JobManager:
                 if updated_context is not None:
                     self._record_context(job, updated_context)
 
+                await self._adjudicate_deferred_unchanged(job)
+                translated_by_position = {
+                    line.position: line for line in job.translated_lines
+                }
+
                 job.current_batch = batch_index + 1
                 job.active_batch_index = None
                 job.active_batch_positions = []
@@ -1668,6 +1820,7 @@ class JobManager:
                     return
 
             await self._process_pending_retranslations(job, "job end")
+            await self._adjudicate_deferred_unchanged(job, force=True)
             job.translated_srt = compose_translated_srt(subtitles, job.translated_lines)
             job.active_batch_index = None
             job.active_batch_positions = []

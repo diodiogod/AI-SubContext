@@ -17,6 +17,9 @@ from app.subtitle_formatting import (
 from app.translator import (
     OpenAICompatibleTranslator,
     _extract_json_blob,
+    _looks_like_ambiguous_unchanged_fragment,
+    _looks_like_unchanged_proper_name,
+    _strong_repair_positions,
     _translation_item_text,
     _translation_items,
     _single_translation_text,
@@ -260,6 +263,39 @@ class SubtitleFormattingTests(unittest.TestCase):
 
 
 class SubtitleValidationTests(unittest.TestCase):
+    def test_punctuated_multi_token_names_are_valid_unchanged_text(self) -> None:
+        for value in ("Murray, Julían!", "Sra. Lagard…"):
+            with self.subTest(value=value):
+                self.assertTrue(_looks_like_unchanged_proper_name(value, value))
+                result = _validate_translated_batch(
+                    settings(),
+                    [SubtitleLine(position=0, text=value)],
+                    [SubtitleLine(position=0, text=value)],
+                )
+                self.assertEqual(result.suspicious_positions, [])
+
+    def test_short_unchanged_phrase_is_deferred_without_failing_batch(self) -> None:
+        value = "Thank you!"
+        self.assertTrue(_looks_like_ambiguous_unchanged_fragment(value, value))
+        result = _validate_translated_batch(
+            settings(),
+            [SubtitleLine(position=0, text=value)],
+            [SubtitleLine(position=0, text=value)],
+        )
+        self.assertEqual(result.suspicious_positions, [0])
+        self.assertEqual(result.ambiguous_unchanged_positions, [0])
+        self.assertFalse(result.failed)
+        self.assertEqual(
+            _strong_repair_positions(
+                settings(),
+                [SubtitleLine(position=0, text=value)],
+                [SubtitleLine(position=0, text=value)],
+                result,
+                [0],
+            ),
+            [],
+        )
+
     def test_styled_names_and_vocal_sounds_are_not_false_errors(self) -> None:
         source = [
             SubtitleLine(position=0, text='<font color="#ffffff">Avery!</font>'),

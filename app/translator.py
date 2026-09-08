@@ -403,6 +403,7 @@ class BatchValidationResult:
     boundary_positions: list[int] = field(default_factory=list)
     sequence_drift_positions: list[int] = field(default_factory=list)
     formatting_positions: list[int] = field(default_factory=list)
+    ambiguous_unchanged_positions: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1184,6 +1185,33 @@ def _single_line_revision_schema() -> dict[str, Any]:
     }
 
 
+def _unchanged_adjudication_schema(max_items: int) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "maxItems": max(1, max_items),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "position": {"type": "integer"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["valid_unchanged", "needs_translation"],
+                        },
+                        "text": {"type": "string", "maxLength": 500},
+                    },
+                    "required": ["position", "verdict", "text"],
+                },
+            },
+        },
+        "required": ["decisions"],
+    }
+
+
 def merge_session_context(current: SessionContext | None, update: dict[str, Any]) -> SessionContext:
     base = current.model_dump() if current else SessionContext().model_dump()
 
@@ -1309,9 +1337,34 @@ def _looks_like_unchanged_proper_name(
         and all(token[0].isupper() for token in tokens)
         and not any(token.casefold() in _NON_NAME_TITLE_WORDS for token in tokens)
     ):
-        non_name_punctuation = re.sub(r"[\wÀ-ÿ'’\-\s.?,]", "", source)
+        # Names in dialogue commonly carry terminal emphasis or an ellipsis.
+        # Treat punctuation as neutral here, while still rejecting symbols and
+        # other non-name content.
+        non_name_punctuation = re.sub(r"[\wÀ-ÿ'’\-\s.,?!:;…¡¿\"“”‘’]", "", source)
         return not non_name_punctuation
     return False
+
+
+def _looks_like_ambiguous_unchanged_fragment(
+    source_text: str,
+    translated_text: str,
+    session_context: SessionContext | None = None,
+) -> bool:
+    """Return true for short unchanged text that needs semantic adjudication.
+
+    Obvious names and vocalizations are accepted before this function is used.
+    Short fragments such as labels, interjections, or source/target cognates are
+    unsafe to repair blindly, but are cheap to adjudicate together later.
+    """
+    source = _normalize_text(source_text)
+    translated = _normalize_text(translated_text)
+    if not source or source.casefold() != translated.casefold():
+        return False
+    if _looks_like_unchanged_proper_name(source, translated, session_context):
+        return False
+    if _looks_like_language_neutral_vocalization(source):
+        return False
+    return len(source) <= 48 and len(_word_tokens(source)) <= 4
 
 
 def _looks_like_language_neutral_vocalization(value: str) -> bool:
@@ -1466,6 +1519,8 @@ def _line_has_strong_failure_signal(
     if len(source) >= 8 and source.casefold() == translated.casefold():
         if _looks_like_unchanged_proper_name(source, translated, session_context):
             return False
+        if _looks_like_ambiguous_unchanged_fragment(source, translated, session_context):
+            return False
         return True
     if validation and validation.detected_language and validation.detected_language == source_code:
         return True
@@ -1531,6 +1586,15 @@ def _validate_translated_batch(
         for source, translated in zip(batch_lines, translated_lines, strict=False)
         if _line_looks_untranslated(source.text, translated.text, session_context)
     ]
+    ambiguous_unchanged_positions = [
+        source.position
+        for source, translated in zip(batch_lines, translated_lines, strict=False)
+        if _looks_like_ambiguous_unchanged_fragment(
+            source.text,
+            translated.text,
+            session_context,
+        )
+    ]
     boundary_positions = _boundary_drift_positions(batch_lines, translated_lines)
     sequence_drift_positions = _sequence_drift_positions(batch_lines, translated_lines)
     formatting_positions = [
@@ -1551,9 +1615,17 @@ def _validate_translated_batch(
 
     failed = False
     reasons: list[str] = []
-    if untranslated_positions and len(untranslated_positions) >= _batch_failure_threshold(len(batch_lines)):
+    actionable_untranslated_positions = [
+        position
+        for position in untranslated_positions
+        if position not in set(ambiguous_unchanged_positions)
+    ]
+    if (
+        actionable_untranslated_positions
+        and len(actionable_untranslated_positions) >= _batch_failure_threshold(len(batch_lines))
+    ):
         failed = True
-        reasons.append(f"suspicious untranslated lines: {untranslated_positions[:5]}")
+        reasons.append(f"suspicious untranslated lines: {actionable_untranslated_positions[:5]}")
     if boundary_positions and len(boundary_positions) >= 2:
         failed = True
         reasons.append(f"possible subtitle boundary drift: {boundary_positions[:5]}")
@@ -1578,6 +1650,7 @@ def _validate_translated_batch(
         boundary_positions=boundary_positions,
         sequence_drift_positions=sequence_drift_positions,
         formatting_positions=formatting_positions,
+        ambiguous_unchanged_positions=ambiguous_unchanged_positions,
     )
 
 
@@ -2818,6 +2891,73 @@ class OpenAICompatibleTranslator:
             ),
         )
 
+    async def adjudicate_unchanged_lines(
+        self,
+        settings: TranslationSettings,
+        candidates: list[dict[str, Any]],
+        session_context: SessionContext | None = None,
+        log_event: LogEvent | None = None,
+    ) -> list[dict[str, Any]]:
+        """Classify ambiguous unchanged fragments in one model request."""
+        if not candidates:
+            return []
+        payload = {
+            "task": (
+                "Review short subtitle translations that are identical to their source. "
+                "For each position, decide whether identical text is valid (for example a name, title, "
+                "acronym, label, number, or expression shared by both languages) or whether it still "
+                "needs translation. If it needs translation, provide only the corrected target-language "
+                "subtitle in text. Never merge neighboring subtitle cues."
+            ),
+            **_language_prompt_payload(settings),
+            "context": session_context.model_dump() if session_context else {},
+            "candidates": candidates,
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You adjudicate ambiguous unchanged subtitle fragments. Return JSON only. "
+                    "Return exactly one decision for every supplied position."
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        if log_event:
+            log_event("info", f"Adjudicating {len(candidates)} deferred unchanged subtitle(s) in one request")
+        data = await self._chat_json(
+            settings,
+            messages,
+            "unchanged_subtitle_adjudication",
+            _unchanged_adjudication_schema(len(candidates)),
+            log_event=log_event,
+        )
+        expected = {int(item["position"]) for item in candidates}
+        decisions: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in data.get("decisions") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                position = int(item.get("position"))
+            except (TypeError, ValueError):
+                continue
+            verdict = str(item.get("verdict") or "")
+            if position not in expected or position in seen or verdict not in {
+                "valid_unchanged",
+                "needs_translation",
+            }:
+                continue
+            decisions.append(
+                {
+                    "position": position,
+                    "verdict": verdict,
+                    "text": str(item.get("text") or "").strip(),
+                }
+            )
+            seen.add(position)
+        return decisions
+
     async def _repair_suspicious_lines(
         self,
         settings: TranslationSettings,
@@ -3236,7 +3376,16 @@ class OpenAICompatibleTranslator:
             repair_stats.visual_doubts.extend(visual_doubts)
             return repaired_lines, merged_context, repair_stats
 
-        recovery_positions = flagged_positions or [line.position for line in batch_lines]
+        recovery_positions = _strong_repair_positions(
+            settings,
+            batch_lines,
+            translated_lines,
+            validation,
+            flagged_positions,
+            merged_context,
+        )
+        if not recovery_positions:
+            recovery_positions = flagged_positions or [line.position for line in batch_lines]
         recovery_lines = [line for line in batch_lines if line.position in set(recovery_positions)]
         if log_event:
             log_event(
@@ -3326,7 +3475,17 @@ class OpenAICompatibleTranslator:
             partial_update(merged_lines, targeted_live_issues, "targeted retry", remaining_positions)
 
         if remaining_positions:
-            repair_positions = remaining_positions[:MAX_ISOLATED_REPAIRS_PER_BATCH]
+            repair_positions = _strong_repair_positions(
+                settings,
+                batch_lines,
+                merged_lines,
+                recovery_validation,
+                remaining_positions,
+                merged_context,
+            )[:MAX_ISOLATED_REPAIRS_PER_BATCH]
+        else:
+            repair_positions = []
+        if repair_positions:
             merged_lines, _ = await self._repair_suspicious_lines(
                 settings,
                 batch_lines,
@@ -3340,7 +3499,17 @@ class OpenAICompatibleTranslator:
                 partial_update=partial_update,
             )
 
-        final_validation, final_failed_positions = validate(merged_lines)
+        final_validation, final_flagged_positions = validate(merged_lines)
+        deferred_positions = [
+            position
+            for position in final_flagged_positions
+            if position in final_validation.ambiguous_unchanged_positions
+        ]
+        final_failed_positions = [
+            position
+            for position in final_flagged_positions
+            if position not in set(deferred_positions)
+        ]
         fixed_positions = [position for position in recovery_positions if position not in final_failed_positions]
         final_issues = [
             *_build_validation_issues(
@@ -3365,6 +3534,17 @@ class OpenAICompatibleTranslator:
                 validation=final_validation,
                 session_context=merged_context,
             ),
+            *_build_validation_issues(
+                settings,
+                "suspect",
+                deferred_positions,
+                batch_lines,
+                merged_lines,
+                batch_index,
+                ["Short unchanged fragment deferred for batched adjudication."],
+                validation=final_validation,
+                session_context=merged_context,
+            ),
         ]
         if partial_update:
             partial_update(merged_lines, final_issues, "recovery complete", [])
@@ -3374,7 +3554,7 @@ class OpenAICompatibleTranslator:
                 f"Bounded recovery stopped with {len(final_failed_positions)} unresolved line(s): {final_failed_positions[:12]}",
             )
         return merged_lines, merged_context, BatchProcessingStats(
-            suspicious_count=len(recovery_positions),
+            suspicious_count=len(flagged_positions),
             fixed_count=len(fixed_positions),
             error_count=len(final_failed_positions),
             retried_batches=1 + (1 if remaining_positions else 0),
