@@ -1122,3 +1122,630 @@ body.modern-embedded-tool { background: #0e1519; }
     overflow-x: auto;
   }
 }
+
+/* Light theme finishing pass.  Keep the information architecture and imagery,
+   but move every shell, review, and prompt surface onto the same readable
+   neutral palette. */
+body[data-modern-theme="light"] {
+  color-scheme: light;
+  --bg: #edf1f2;
+  --bg-deep: #e5ebed;
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --panel-2: #f4f7f8;
+  --text: #172329;
+  --muted: #60727b;
+  --line: rgba(38, 59, 67, 0.16);
+  --line-strong: rgba(38, 59, 67, 0.28);
+  --accent: #39738b;
+  --accent-strong: #285d73;
+  --accent-2: #98652a;
+  --danger: #b7443d;
+  --ok: #2f7c4a;
+  --modern-bg: #edf1f2;
+  --modern-sidebar: #f7f9f9;
+  --modern-surface: #ffffff;
+  --modern-surface-2: #f4f7f8;
+  --modern-line: rgba(38, 59, 67, 0.16);
+  --modern-muted: #60727b;
+  --modern-blue: #39738b;
+  --modern-blue-soft: rgba(57, 115, 139, 0.10);
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* Modern shell navigation and shared text. */
+body.modern-ui[data-modern-theme="light"] {
+  color: var(--text);
+  background: var(--modern-bg);
+}
+body.modern-ui[data-modern-theme="light"] .modern-sidebar {
+  color: var(--text);
+  background: var(--modern-sidebar);
+}
+body.modern-ui[data-modern-theme="light"] .modern-sidebar :is(button, a) {
+  color: var(--modern-muted);
+}
+body.modern-ui[data-modern-theme="light"] .modern-sidebar :is(button, a):hover,
+body.modern-ui[data-modern-theme="light"] .modern-sidebar button.is-active {
+  color: var(--text);
+  background: rgba(57, 115, 139, 0.10);
+}
+body.modern-ui[data-modern-theme="light"] :is(.modern-recent-heading, .modern-recent-loading) {
+  color: #71828a;
+}
+body.modern-ui[data-modern-theme="light"] .modern-recent-job strong {
+  color: #26383f;
+}
+body.modern-ui[data-modern-theme="light"] .modern-recent-job span {
+  color: #6b7d85;
+}
+body.modern-ui[data-modern-theme="light"] .modern-sidebar .modern-recent-job:hover {
+  background: rgba(57, 115, 139, 0.08);
+}
+body.modern-ui[data-modern-theme="light"] .modern-sidebar .modern-recent-retry {
+  color: #98652a;
+}
+body.modern-ui[data-modern-theme="light"] .modern-view-tabs :is(button, a) {
+  color: var(--modern-muted);
+}
+body.modern-ui[data-modern-theme="light"] .modern-view-tabs :is(button, a):hover,
+body.modern-ui[data-modern-theme="light"] .modern-view-tabs button.is-active {
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"] :is(.modern-brand, .modern-topbar h1, .modern-ui .panel, .modern-settings-card dd) {
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"] .modern-kicker,
+body.modern-ui[data-modern-theme="light"] .modern-section-description,
+body.modern-ui[data-modern-theme="light"] .modern-settings-card dt {
+  color: var(--modern-muted);
+}
+
+/* Overview: retain the visual hierarchy while making every card part of the
+   light canvas instead of leaving dark islands behind. */
+body.modern-ui[data-modern-theme="light"] :is(
+  .modern-ui .panel,
+  .modern-job-settings,
+  .modern-live-context,
+  .modern-cast-panel,
+  .modern-supporting-context,
+  .modern-supporting-grid > .tile,
+  .modern-supporting-grid > .context-section
+) {
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card > .context-card > .panel-head {
+  background: #ffffff;
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .runtime-activity {
+  color: #2d6378;
+  background: rgba(57, 115, 139, 0.09);
+  border-color: rgba(57, 115, 139, 0.22);
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .validation-summary {
+  background: #f4f7f8;
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .validation-stat {
+  background: transparent;
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .validation-stat:is(:hover, :focus-visible) {
+  background: rgba(57, 115, 139, 0.08);
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .validation-stat-label {
+  color: #41545c;
+  background: #e3ecee;
+}
+body.modern-ui[data-modern-theme="light"] #active-job-card .vision-timeline {
+  color: var(--text);
+  background: #f4f7f8;
+  border-color: var(--modern-line);
+}
+body.modern-ui[data-modern-theme="light"] :is(.vision-timeline-stats span, .modern-job-settings dl > div) {
+  color: var(--modern-muted);
+  background: #eef3f4;
+  border-color: var(--modern-line);
+}
+body.modern-ui[data-modern-theme="light"] .vision-timeline-stats .vision-rail-control {
+  color: var(--accent);
+  background: rgba(57, 115, 139, 0.08);
+  border-color: rgba(57, 115, 139, 0.24);
+}
+body.modern-ui[data-modern-theme="light"] .modern-live-context,
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel {
+  background: #ffffff;
+}
+body.modern-ui[data-modern-theme="light"] .modern-live-context > .scene {
+  color: #24343a;
+  background: #eaf2f3;
+  border-left-color: var(--accent);
+}
+body.modern-ui[data-modern-theme="light"] .modern-live-context > .scene .mini-eyebrow {
+  color: #58717b;
+}
+body.modern-ui[data-modern-theme="light"] .modern-live-indicator {
+  color: #39738b;
+  background: rgba(57, 115, 139, 0.10);
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .grid-characters .tile-fixed {
+  color: var(--text);
+  background: #f3f7f8;
+  border-color: rgba(38, 59, 67, 0.16);
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .grid-characters .tile-fixed:hover,
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .grid-characters .tile-fixed:focus-within {
+  background: #eaf2f3;
+  border-color: rgba(57, 115, 139, 0.42);
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .tile-title-text,
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .tile h4 {
+  color: #1a2b31;
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .tile-copy {
+  color: #60727b;
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .chip-row::after {
+  color: #52666e;
+  background: #e4ecee;
+}
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .chip,
+body.modern-ui[data-modern-theme="light"] .modern-cast-panel .inline-badge {
+  color: #81541f;
+  background: rgba(152, 101, 42, 0.10);
+  border-color: rgba(152, 101, 42, 0.22);
+}
+body.modern-ui[data-modern-theme="light"] .modern-character-sheet-identity > span,
+body.modern-ui[data-modern-theme="light"] .modern-character-sheet-aliases > span {
+  color: #52666e;
+  background: #edf2f3;
+}
+body.modern-ui[data-modern-theme="light"] .modern-character-sheet-detail p {
+  color: #26383f;
+}
+body.modern-ui[data-modern-theme="light"] .modern-supporting-context {
+  background: #ffffff;
+}
+body.modern-ui[data-modern-theme="light"] .modern-supporting-grid > .tile,
+body.modern-ui[data-modern-theme="light"] .modern-supporting-grid > .context-section {
+  color: var(--text);
+  background: #f3f7f8;
+  border-color: rgba(38, 59, 67, 0.14);
+}
+body.modern-ui[data-modern-theme="light"] .modern-supporting-grid .tile p,
+body.modern-ui[data-modern-theme="light"] .modern-supporting-grid .tile li {
+  color: #60727b;
+}
+body.modern-ui[data-modern-theme="light"] .modern-log-button {
+  color: var(--modern-muted);
+  background: transparent;
+}
+body.modern-ui[data-modern-theme="light"] .modern-log-button span:last-child {
+  color: var(--text);
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(25, 45, 53, 0.16);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="overview"] #active-job-card .modern-log-button span:last-child {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line-strong);
+}
+
+/* Evidence cards intentionally keep a dark image treatment in the light
+   theme; their overlaid time and scene labels must stay bright against it. */
+body.modern-ui[data-modern-theme="light"] :is(.vision-frame, .vision-frame-time) {
+  color: #f5f7f8;
+}
+body.modern-ui[data-modern-theme="light"] .vision-frame-time {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.72);
+}
+
+/* Setup and jobs use the same surface tokens as Overview. */
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .form-section,
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] :is(.secondary-file, .optional-source-card, .advanced-settings),
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .checkbox-card {
+  color: var(--text);
+  background: #ffffff;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] :is(input, select, textarea) {
+  color: var(--text);
+  background: #f8fafb;
+  border-color: rgba(38, 59, 67, 0.18);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .drop-zone {
+  color: var(--text);
+  background: #f8fbfb;
+  border-color: rgba(57, 115, 139, 0.42);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .drop-zone:hover {
+  background: #eef6f7;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] #vision-controls {
+  color: var(--text);
+  background: #f4f7f8;
+  border-color: var(--modern-line);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] #vision-controls .vision-control-group {
+  color: var(--text);
+  background: transparent;
+  border-color: var(--modern-line);
+}
+/* The shared stylesheet gives the advanced details body an explicit grid
+   display, which otherwise overrides the browser's closed-details behavior. */
+body.modern-ui[data-modern-view="setup"] .advanced-settings:not([open]) > .advanced-settings-body {
+  display: none;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] :is(.modern-drop-icon, .modern-file-icon, .modern-strategy-icon) {
+  color: #66828d;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] :is(.modern-browse-button, .modern-file-action) {
+  color: #2c6076;
+  background: rgba(57, 115, 139, 0.08);
+  border-color: rgba(57, 115, 139, 0.32);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .modern-connection-statuses .job-meta {
+  color: #a23f39;
+  background: #fff1ef;
+  border-color: rgba(183, 68, 61, 0.24);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .checkbox-card:has(input:checked) {
+  background: rgba(57, 115, 139, 0.08);
+  border-color: rgba(57, 115, 139, 0.42);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .launch-actions {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -10px 28px rgba(31, 53, 61, 0.12);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .launch-actions button[type="submit"] {
+  color: #ffffff;
+  background: var(--accent);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .launch-actions button[type="submit"] small {
+  color: rgba(255, 255, 255, 0.78);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] #jobs-panel,
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] .job {
+  color: var(--text);
+  background: #ffffff;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] :is(.job-stat, .job-health, .job-health > button) {
+  color: var(--text);
+  background: #f4f7f8;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] .job-health > button:hover {
+  background: rgba(57, 115, 139, 0.08);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] :is(.job-title, .job-copy, .job-fact, .job-health strong) {
+  color: var(--text);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] :is(.job-kicker, .job-meta, .job-fact, .job-health small, .job-auxiliary-details > summary) {
+  color: var(--modern-muted);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] :is(.jobs-filter-rail button, .jobs-search-box input) {
+  color: var(--text);
+  background: #f8fafb;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] .jobs-filter-rail button:hover,
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] .jobs-filter-rail button.is-active {
+  color: var(--accent);
+  background: rgba(57, 115, 139, 0.09);
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="jobs"] .jobs-filter-rail [data-jobs-filter-count] {
+  color: #52666e;
+  background: #e7eef0;
+}
+body.modern-ui[data-modern-theme="light"] .job-auxiliary-details .vision-timeline {
+  color: var(--text);
+  background: #f4f7f8;
+}
+body.modern-ui[data-modern-theme="light"] .job-auxiliary-details .vision-timeline-stats span {
+  color: var(--modern-muted);
+  background: #edf2f3;
+}
+body.modern-ui[data-modern-theme="light"] :is(.job-more-actions > div, .tips-history-menu, .review-column-menu-body) {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line-strong);
+  box-shadow: 0 14px 34px rgba(25, 45, 53, 0.16);
+}
+
+/* Dialogs and logs are part of the same light theme, including dialogs opened
+   from embedded subtitle and evidence views. */
+body[data-modern-theme="light"] dialog {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+  box-shadow: 0 24px 80px rgba(25, 45, 53, 0.22);
+}
+body[data-modern-theme="light"] dialog::backdrop {
+  background: rgba(24, 39, 45, 0.28);
+}
+body[data-modern-theme="light"] :is(.detail-dialog-body, .log-dialog-body, .review-dialog-body, .snapshot-dialog-body, .vision-evidence-dialog-body) {
+  color: var(--text);
+  background: #f5f8f8;
+}
+body[data-modern-theme="light"] .log-tabs {
+  background: linear-gradient(180deg, rgba(245, 248, 248, 0.98), rgba(245, 248, 248, 0.90));
+}
+body[data-modern-theme="light"] :is(.log-tab, .log-overview-item, .log-entry, .issue-entry, .review-item, .editor-section, .editor-item, .snapshot-preview, .vision-evidence-detail, .vision-translation-compare > div) {
+  color: var(--text);
+  background: #ffffff;
+}
+body[data-modern-theme="light"] :is(.log-message, .issue-copy, .review-source-block p, .review-source-block, .review-translation-block) {
+  color: var(--text);
+}
+
+/* Embedded Subtitles and Prompt Lab pages inherit app.css, so give them an
+   explicit light token set and replace its remaining dark fixed backgrounds. */
+body.modern-embedded-tool[data-modern-theme="light"] {
+  color-scheme: light;
+  --bg: #edf1f2;
+  --bg-deep: #e5ebed;
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --panel-2: #f4f7f8;
+  --text: #172329;
+  --muted: #60727b;
+  --line: rgba(38, 59, 67, 0.16);
+  --line-strong: rgba(38, 59, 67, 0.28);
+  --accent: #39738b;
+  --accent-strong: #285d73;
+  --accent-2: #98652a;
+  --danger: #b7443d;
+  --ok: #2f7c4a;
+  background: var(--bg);
+  color: var(--text);
+}
+body.modern-embedded-tool[data-modern-theme="light"] .tool-shell,
+body.modern-embedded-tool[data-modern-theme="light"] .tool-shell > * {
+  color: var(--text);
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(.panel, .review-header, .review-table-panel, .review-side-panel) {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+  box-shadow: 0 12px 30px rgba(25, 45, 53, 0.08);
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(input, textarea, select) {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(input, textarea, select):focus {
+  background: #ffffff;
+  border-color: rgba(57, 115, 139, 0.52);
+}
+body.modern-embedded-tool[data-modern-theme="light"] button.ghost,
+body.modern-embedded-tool[data-modern-theme="light"] a.link-button {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+}
+body.modern-embedded-tool[data-modern-theme="light"] .workspace-header #prompt-lab-save {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+/* Prompt Lab */
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] :is(
+  .prompt-lab-flow,
+  .prompt-template-guide,
+  .prompt-auto-blocks,
+  .prompt-field-block,
+  .prompt-lab-page > .tool-shell > .panel:not(.workspace-header),
+  .prompt-lab-page #prompt-lab-form > .panel
+) {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-template-guide {
+  background: linear-gradient(135deg, #f4fafb, #ffffff);
+  border-color: rgba(57, 115, 139, 0.25);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-auto-blocks {
+  background: linear-gradient(135deg, #fffaf1, #ffffff);
+  border-color: rgba(152, 101, 42, 0.26);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] :is(.prompt-template-copy span, .prompt-auto-blocks span, .prompt-auto-blocks li, .prompt-variable-preview) {
+  color: var(--muted);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-auto-blocks li {
+  border-left-color: rgba(152, 101, 42, 0.42);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] button.prompt-variable-chip {
+  color: #2d6378;
+  background: rgba(57, 115, 139, 0.08);
+  border-color: rgba(57, 115, 139, 0.28);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-variable-preview code {
+  color: #81541f;
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-input {
+  color: var(--text);
+  background: #f8fafb;
+  border-color: var(--line);
+}
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-field-tools > span,
+body.modern-embedded-tool.prompt-lab-page[data-modern-theme="light"] .prompt-lab-flow p {
+  color: var(--muted);
+}
+
+/* Subtitle review */
+body.modern-embedded-tool.review-page[data-modern-theme="light"] :is(.review-progress-card, .review-filter, .review-table-wrap, .review-source-block, .review-translation-block, .review-raw-editor, .reference-line-card) {
+  color: var(--text);
+  background: #f8fafb;
+  border-color: var(--line);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-filter {
+  background: #ffffff;
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] :is(.review-filter:hover, .review-filter.is-active) {
+  background: rgba(57, 115, 139, 0.09);
+  color: var(--accent);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-table-wrap {
+  background: #ffffff;
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-table th {
+  color: #52666e;
+  background: #edf2f3;
+  border-bottom-color: var(--line);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-table td,
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-row {
+  color: var(--text);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-row:hover {
+  background: rgba(57, 115, 139, 0.05);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-row.is-selected {
+  background: rgba(57, 115, 139, 0.11);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-row.is-marked {
+  background: rgba(57, 115, 139, 0.07);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] :is(.stacked-subtitle-label, .table-time, .table-reasons, .table-reference-summary, .review-side-body, .review-side-meta) {
+  color: var(--muted);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .subtitle-preview.is-formatted {
+  color: var(--text);
+  background: #f3f7f8;
+  border-color: rgba(57, 115, 139, 0.16);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .subtitle-preview.is-broken {
+  background: #fff1ef;
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .subtitle-preview.is-broken code {
+  color: #9f3d37;
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-decision-bar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), #ffffff 28%);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-decision-bar #workspace-save {
+  color: #ffffff;
+  background: var(--accent);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] :is(.review-side-panel h1, .review-side-panel h2, .review-side-panel h3, .review-side-panel p, .review-source-block p, .review-translation-block p) {
+  color: var(--text);
+}
+body.modern-embedded-tool.review-page[data-modern-theme="light"] .review-column-menu-body {
+  background: #ffffff;
+  color: var(--text);
+}
+body.modern-embedded-tool[data-modern-theme="light"] .job-fact {
+  color: #40545d;
+  background: #edf2f3;
+  border-color: var(--line);
+}
+body.modern-embedded-tool[data-modern-theme="light"] .reason-tag {
+  color: #60727b;
+  background: #edf2f3;
+  border-color: var(--line);
+}
+body.modern-embedded-tool[data-modern-theme="light"] .reason-source_leak {
+  color: #81541f;
+}
+body.modern-embedded-tool[data-modern-theme="light"] .reason-missing_output {
+  color: #9f3d37;
+}
+body.modern-embedded-tool[data-modern-theme="light"] .reason-unchanged {
+  color: #52666e;
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(.reason-manual, .reason-retry_fixed) {
+  color: #2f7c4a;
+}
+body.modern-embedded-tool[data-modern-theme="light"] kbd {
+  color: #52666e;
+  background: #e7eef0;
+  border-color: var(--line);
+  box-shadow: none;
+}
+body.modern-embedded-tool[data-modern-theme="light"] .workspace-toast {
+  color: var(--text);
+  background: #eef6f7;
+  border-color: rgba(57, 115, 139, 0.28);
+  box-shadow: 0 12px 30px rgba(25, 45, 53, 0.16);
+}
+
+/* A few status and utility controls keep their dark-theme pastel tokens in
+   app.css.  Give those tokens readable light-theme equivalents everywhere
+   they appear in the modern shell. */
+body.modern-ui[data-modern-theme="light"] :is(button.warn, button.danger) {
+  border-color: var(--line-strong);
+}
+body.modern-ui[data-modern-theme="light"] button.warn {
+  color: #76531e;
+  background: #fff6e7;
+}
+body.modern-ui[data-modern-theme="light"] button.danger {
+  color: #a23f39;
+  background: #fff1ef;
+}
+body.modern-ui[data-modern-theme="light"] :is(.badge.processing, .badge.paused) {
+  background: #f1f5f6;
+}
+body.modern-ui[data-modern-theme="light"] .badge.processing {
+  color: #2f6c8c;
+}
+body.modern-ui[data-modern-theme="light"] .badge.paused {
+  color: #6d4e96;
+}
+body.modern-ui[data-modern-theme="light"] .job-corner-label {
+  color: #40545d;
+}
+body.modern-ui[data-modern-theme="light"] kbd {
+  color: #52666e;
+  background: #e7eef0;
+  border-color: var(--line);
+  box-shadow: none;
+}
+body.modern-ui[data-modern-theme="light"] .vision-timeline-stats .failed {
+  color: #a23f39;
+}
+body.modern-ui[data-modern-theme="light"] .validation-stat.is-progress strong {
+  color: #2f6c8c;
+}
+body.modern-ui[data-modern-theme="light"] .vision-evidence-image figcaption {
+  color: #d7e2e5;
+  background: rgba(7, 18, 25, 0.88);
+}
+body.modern-ui[data-modern-theme="light"] .vision-evidence-image {
+  color: #d7e2e5;
+}
+body.modern-ui[data-modern-theme="light"][data-modern-view="setup"] .workflow-steps span {
+  color: #60727b;
+}
+/* Long filenames in confirmation copy must wrap inside the compact dialog;
+   otherwise the action row grows past the viewport and becomes unreachable. */
+body.modern-ui .confirm-dialog {
+  overflow-x: hidden;
+}
+body.modern-ui .confirm-dialog-copy {
+  min-width: 0;
+}
+body.modern-ui .confirm-dialog-copy :is(h2, p) {
+  overflow-wrap: anywhere;
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(button.warn, button.danger) {
+  border-color: var(--line-strong);
+}
+body.modern-embedded-tool[data-modern-theme="light"] button.warn {
+  color: #76531e;
+  background: #fff6e7;
+}
+body.modern-embedded-tool[data-modern-theme="light"] button.danger {
+  color: #a23f39;
+  background: #fff1ef;
+}
+body.modern-embedded-tool[data-modern-theme="light"] :is(.badge.processing, .badge.paused) {
+  background: #f1f5f6;
+}
+body.modern-embedded-tool[data-modern-theme="light"] .badge.processing {
+  color: #2f6c8c;
+}
+body.modern-embedded-tool[data-modern-theme="light"] .badge.paused {
+  color: #6d4e96;
+}

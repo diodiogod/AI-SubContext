@@ -114,6 +114,13 @@
   `;
   shell.append(toolDeck);
 
+  for (const frame of toolDeck.querySelectorAll("iframe")) {
+    frame.addEventListener("load", () => {
+      const theme = document.body.dataset.modernTheme;
+      if (theme && frame.contentDocument?.body) frame.contentDocument.body.dataset.modernTheme = theme;
+    });
+  }
+
   const jobSettingsPanel = document.createElement("section");
   jobSettingsPanel.className = "modern-job-settings";
   jobSettingsPanel.setAttribute("aria-label", "Current job settings");
@@ -421,7 +428,11 @@
       const jobs = await response.json();
       recentJobs = jobs;
       const visibleJobId = overviewPanel.querySelector("[data-action][data-id]")?.dataset.id;
-      const visibleJob = jobs.find(job => job.id === visibleJobId);
+      const requestedJobId = new URLSearchParams(window.location.search).get("job");
+      const visibleJob = jobs.find(job => job.id === visibleJobId)
+        || jobs.find(job => job.id === window.modernSelectedJobId)
+        || jobs.find(job => job.id === requestedJobId)
+        || jobs.find(job => job.session_context && ["processing", "queued", "paused"].includes(job.status));
       if (visibleJob && document.body.dataset.modernView === "overview") setHeaderForJob(visibleJob);
       if (visibleJob) renderJobSettings(visibleJob);
       target.innerHTML = "";
@@ -628,7 +639,14 @@
     openCharacterSheet(card);
   });
 
-  const observer = new MutationObserver(() => enhanceOverview());
+  const observer = new MutationObserver(() => {
+    enhanceOverview();
+    if (!jobSettingsPanel.innerHTML.trim()) {
+      const activeId = overviewPanel.querySelector("[data-action][data-id]")?.dataset.id;
+      const activeJob = recentJobs.find(job => job.id === activeId);
+      if (activeJob) renderJobSettings(activeJob);
+    }
+  });
   observer.observe(overviewPanel, { childList: true, subtree: true });
   enhanceOverview();
   enhanceSetup();
