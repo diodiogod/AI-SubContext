@@ -81,6 +81,38 @@
   const openActionMenus = new Set();
   let characterSheetScroll = null;
 
+  function enhanceSetup() {
+    const form = setupPanel.querySelector("#job-form");
+    if (!form || form.classList.contains("modern-setup-ready")) return;
+    form.classList.add("modern-setup-ready");
+
+    const bannerCopy = setupPanel.querySelector(".panel-banner > div:first-child");
+    if (bannerCopy) bannerCopy.innerHTML = '<div class="mini-eyebrow">New translation</div><h2>Build a context-aware translation</h2><p>Choose the files, language, and engine. Context tools stay optional.</p>';
+
+    const stepLabels = ["Files", "Translation", "Engine & context"];
+    setupPanel.querySelectorAll(".workflow-steps span").forEach((step, index) => {
+      const number = step.querySelector("b")?.outerHTML || `<b>${index + 1}</b>`;
+      step.innerHTML = `${number}<em>${stepLabels[index] || step.textContent.trim()}</em>`;
+    });
+
+    const relabel = (selector, eyebrow, title) => {
+      const section = form.querySelector(selector);
+      const label = section?.querySelector(".section-title-row > div");
+      if (label) label.innerHTML = `<div class="mini-eyebrow">${eyebrow}</div><h3>${title}</h3>`;
+    };
+    relabel(".source-section", "Files", "Add translation files");
+    relabel(".translation-section", "Translation", "Language and title");
+    relabel(".model-section", "Engine", "Translation engine");
+
+    const launchActions = form.querySelector(".launch-actions");
+    if (launchActions && launchActions.parentElement !== form) form.append(launchActions);
+
+    for (const link of form.querySelectorAll('a[href="/prompt-lab"]')) {
+      link.href = "#prompt";
+      link.dataset.modernView = "prompt";
+    }
+  }
+
   function renderJobSettings(job) {
     if (!jobSettingsPanel) return;
     if (!job) {
@@ -102,7 +134,7 @@
       <section class="panel modern-settings-card">
         <div class="modern-settings-intro"><div><span>Configuration snapshot</span><h2>Settings used by this job</h2></div><p>These values were captured when the translation started.</p></div>
         <dl>${rows.map(([label, value]) => `<div><dt>${escapeHtml(String(label))}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join("")}</dl>
-        <div class="modern-settings-note"><strong>Prompt Lab is shared.</strong><span>Prompt and runtime defaults apply to new jobs and supported resume operations. This snapshot remains unchanged.</span></div>
+        <div class="modern-settings-note"><strong>Prompt configuration saved with this job.</strong><span>The prompt templates and runtime limits used at creation remain part of this job's settings. A supported resume can explicitly adopt newer Prompt Lab values.</span></div>
       </section>`;
   }
 
@@ -476,6 +508,7 @@
   const observer = new MutationObserver(() => enhanceOverview());
   observer.observe(overviewPanel, { childList: true, subtree: true });
   enhanceOverview();
+  enhanceSetup();
   void refreshRecentJobs();
   const hashView = window.location.hash.slice(1);
   setView(["overview", "subtitles", "prompt", "settings", "setup", "jobs"].includes(hashView) ? hashView : "overview", false);
