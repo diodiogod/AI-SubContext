@@ -159,6 +159,31 @@
       if (copy) copy.insertAdjacentHTML("beforebegin", `<span class="modern-strategy-icon">${icon(strategyIcons[index] || "file")}</span>`);
     });
 
+    const modelStatus = form.querySelector("#model-list-status");
+    const connectionRow = form.querySelector(".connection-action-row");
+    if (modelStatus && connectionRow) {
+      const statusGroup = document.createElement("div");
+      statusGroup.className = "modern-connection-statuses";
+      connectionRow.prepend(statusGroup);
+      statusGroup.append(modelStatus);
+      const testStatus = connectionRow.querySelector("#connection-test-result");
+      if (testStatus) statusGroup.append(testStatus);
+      const compactStatus = status => {
+        const message = status.textContent.trim();
+        if (!message || !/(failed|error|unavailable|refused)/i.test(message) || message === "Endpoint unavailable") return;
+        status.title = message;
+        status.dataset.fullStatus = message;
+        status.textContent = "Endpoint unavailable";
+      };
+      const statusObserver = new MutationObserver(records => {
+        for (const record of records) compactStatus(record.target.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target);
+      });
+      for (const status of statusGroup.children) {
+        compactStatus(status);
+        statusObserver.observe(status, { childList: true, characterData: true, subtree: true });
+      }
+    }
+
     const launchActions = form.querySelector(".launch-actions");
     if (launchActions && launchActions.parentElement !== form) form.append(launchActions);
 
