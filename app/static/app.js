@@ -120,6 +120,7 @@ const expandedContextHistory = new Set();
 const collapsedJobAuxiliary = new Set();
 const expandedActiveContext = new Set();
 const expandedJobMoreActions = new Set();
+let activeJobRenderSignature = "";
 const renderedContextSnapshots = new Map();
 const modelCallParserState = new Map();
 const modelCallRenderedState = new Map();
@@ -2385,6 +2386,14 @@ function removeContextRow(scope, kind, button) {
   syncContextPreview(scope, root);
 }
 
+function reviewWorkspaceUrl(jobId, filter = null) {
+  const params = new URLSearchParams();
+  if (filter) params.set("filter", filter);
+  if (window.location.pathname === "/modern") params.set("from", "modern");
+  const query = params.toString();
+  return `/review/${encodeURIComponent(jobId)}${query ? `?${query}` : ""}`;
+}
+
 function renderContext(job) {
   const ctx = job.session_context;
   if (!ctx) return "";
@@ -2432,7 +2441,7 @@ function renderContext(job) {
       <div class="active-job-actions">
         <button class="warn" data-action="pause" data-id="${job.id}" title="Pause after the current batch finishes. Safer than interrupting a request mid-generation." ${job.status !== "processing" ? "disabled" : ""}>Pause</button>
         <button class="ghost" data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}" ${!canResume ? "disabled" : ""}>${escapeHtml(resumeLabel)}</button>
-        <a class="link-button" href="/review/${job.id}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
+        <a class="link-button" href="${reviewWorkspaceUrl(job.id)}" title="Open the dedicated table review workspace for this job.">Open Workspace</a>
         <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
           <summary>More</summary>
           <div>
@@ -2722,12 +2731,16 @@ function renderJobs(jobs) {
     jobsEl.innerHTML = `<p class="job-meta">No jobs yet.</p>`;
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
+    activeJobRenderSignature = "";
     stopModelCallAnimation();
     modelCallRenderedState.clear();
     return;
   }
 
-  const active = jobs.find(job => job.status === "processing")
+  const selectedModernJob = window.modernSelectedJobId
+    ? jobs.find(job => job.id === window.modernSelectedJobId && job.session_context)
+    : null;
+  const active = selectedModernJob || jobs.find(job => job.status === "processing")
     || jobs.find(job => job.status === "queued")
     || jobs.find(job => job.status === "paused");
   if (active && active.session_context) {
@@ -2741,13 +2754,20 @@ function renderJobs(jobs) {
         modelCallRenderedState.set(active.id, { percent: renderedPercent, callKey: existingCallKey });
       }
     }
+    const nextActiveSignature = JSON.stringify(active);
+    const activeMarkupChanged = activeJobCard.classList.contains("hidden")
+      || activeJobRenderSignature !== nextActiveSignature;
     activeJobCard.classList.remove("hidden");
-    activeJobCard.innerHTML = renderContext(active);
+    if (activeMarkupChanged) {
+      activeJobCard.innerHTML = renderContext(active);
+      activeJobRenderSignature = nextActiveSignature;
+      refreshVisionRails(activeJobCard);
+    }
     animateCurrentModelCallBar(active);
-    refreshVisionRails(activeJobCard);
   } else {
     activeJobCard.classList.add("hidden");
     activeJobCard.innerHTML = "";
+    activeJobRenderSignature = "";
     stopModelCallAnimation();
     modelCallRenderedState.clear();
   }
@@ -2827,7 +2847,7 @@ function renderJobs(jobs) {
           ? "Restart from line 1 with different settings while retaining completed visual scene guides."
           : "Restore this finished translation job's files and settings into the console so you can run it again with different options.";
       return `
-    <article class="job job-workspace-link" data-job-id="${escapeHtml(job.id)}" data-workspace-url="/review/${job.id}" ${visibleJobIds.has(job.id) ? "" : "hidden"}>
+    <article class="job job-workspace-link" data-job-id="${escapeHtml(job.id)}" data-workspace-url="${reviewWorkspaceUrl(job.id)}" ${visibleJobIds.has(job.id) ? "" : "hidden"}>
       <button class="job-corner-log" data-action="logs" data-id="${job.id}" aria-label="Open job log" title="${escapeHtml(logTitle)}">
         <span class="job-corner-label" aria-hidden="true">log</span>
       </button>
@@ -2851,7 +2871,7 @@ function renderJobs(jobs) {
         </div>
         <div class="job-actions job-primary-actions">
           ${canResume ? `<button data-action="resume" data-id="${job.id}" title="${escapeHtml(resumeTitle)}">${escapeHtml(resumeLabel)}</button>` : ""}
-          <a class="ghost link-button" href="/review/${job.id}">Open Workspace</a>
+          <a class="ghost link-button" href="${reviewWorkspaceUrl(job.id)}">Open Workspace</a>
           ${job.status === "completed" ? `<button class="ghost" data-action="download" data-id="${job.id}">Download</button>` : ""}
           <details class="job-more-actions" data-job-more="${escapeHtml(job.id)}" ${expandedJobMoreActions.has(job.id) ? "open" : ""}>
             <summary>More</summary>
@@ -3254,7 +3274,7 @@ function renderReviewDialog(job, filter = "all") {
         <div class="mini-eyebrow">Better Workflow</div>
         <strong>Use the Review Workspace for table view, faster navigation, and batch-card editing.</strong>
       </div>
-      <a class="review-workspace-link" href="/review/${job.id}">Open Workspace</a>
+      <a class="review-workspace-link" href="${reviewWorkspaceUrl(job.id)}">Open Workspace</a>
     </div>
     <div class="review-filter-row">
       ${["all", "suspect", "fixed", "error"].map(name => `
@@ -3959,7 +3979,7 @@ function bindReferenceTrackCard(zone) {
 async function performAction(action, jobId, filter = "all", trigger = null) {
   if (action === "open-workspace") {
     saveConsoleScrollState();
-    window.location.href = `/review/${encodeURIComponent(jobId)}?filter=${encodeURIComponent(filter || "all")}`;
+    window.location.href = reviewWorkspaceUrl(jobId, filter || "all");
     return;
   }
 

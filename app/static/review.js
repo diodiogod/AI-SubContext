@@ -34,6 +34,11 @@ const snapshotBody = document.getElementById("review-snapshot-body");
 const saveSnapshotBtn = document.getElementById("review-save-snapshot");
 const generateSnapshotBtn = document.getElementById("review-generate-snapshot");
 
+const returnToModern = new URLSearchParams(window.location.search).get("from") === "modern"
+  || document.referrer.endsWith("/modern")
+  || document.referrer.includes("/modern#");
+document.querySelector("[data-console-link]")?.setAttribute("href", returnToModern ? "/modern#overview" : "/");
+
 const jobId = window.location.pathname.split("/").filter(Boolean).pop();
 const VALID_REVIEW_FILTERS = new Set(["all", "suspect", "error", "fixed", "edited", "active", "pending", "missing", "normal"]);
 const requestedReviewFilter = new URLSearchParams(window.location.search).get("filter");

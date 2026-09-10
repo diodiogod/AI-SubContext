@@ -1,0 +1,766 @@
+/* Modern console is deliberately route-scoped. The legacy console remains unchanged. */
+body.modern-ui {
+  --modern-bg: #0e1519;
+  --modern-sidebar: #0a1115;
+  --modern-surface: #151f25;
+  --modern-surface-2: #19262d;
+  --modern-line: rgba(178, 204, 214, 0.14);
+  --modern-muted: #96a8b1;
+  --modern-blue: #7fb7cf;
+  --modern-blue-soft: rgba(127, 183, 207, 0.12);
+  background: var(--modern-bg);
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  color: #eef3f4;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
+body.modern-tool-ui .tool-shell {
+  box-sizing: border-box;
+  width: min(1700px, calc(100vw - 224px));
+  min-width: 0;
+  margin: 0;
+  padding: 0 24px 48px;
+}
+.modern-tool-ui .modern-tool-topbar { margin-bottom: 22px; }
+.modern-tool-ui.review-page .review-shell {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+}
+.modern-tool-ui.review-page .modern-tool-topbar { margin-bottom: 0; }
+.modern-tool-ui .modern-tool-topbar h1 {
+  max-width: min(760px, 48vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modern-tool-ui .workspace-header > .panel-head > div:first-child { display: none; }
+.modern-tool-ui .workspace-header { padding: 10px 14px; }
+.modern-tool-ui .workspace-header > .panel-head { justify-content: flex-end; }
+.modern-tool-ui .modern-view-tabs a.is-active { color: #f3f7f8; border-bottom-color: var(--modern-blue); }
+.modern-tool-ui .modern-view-tabs a[aria-disabled="true"] { opacity: .4; pointer-events: none; }
+
+@media (max-width: 1100px) {
+  body.modern-tool-ui .tool-shell { width: calc(100vw - 68px); padding-inline: 14px; }
+}
+
+body.modern-ui::before,
+body.modern-ui .shell::before,
+body.modern-ui .hero { display: none; }
+
+.modern-preview-link {
+  display: inline-flex;
+  margin-top: 0.75rem;
+  color: var(--accent-strong);
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-underline-offset: 0.22em;
+}
+
+.modern-ui .modern-sidebar {
+  box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 14px 16px;
+  background: var(--modern-sidebar);
+  border-right: 1px solid var(--modern-line);
+}
+.modern-brand {
+  padding: 4px 10px 24px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+.modern-brand span { color: var(--modern-blue); font-family: "IBM Plex Mono", monospace; }
+.modern-primary-nav,
+.modern-secondary-nav { display: grid; gap: 5px; }
+.modern-sidebar-spacer { flex: 1; }
+.modern-secondary-nav { position: relative; z-index: 5; }
+.modern-recent-heading {
+  margin: 22px 10px 8px;
+  color: #6f838d;
+  font: 0.64rem "IBM Plex Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.modern-recent-jobs { display: grid; gap: 3px; min-height: 0; overflow: auto; }
+.modern-recent-loading {
+  padding: 8px 10px;
+  color: #6f838d;
+  font-size: 0.76rem;
+}
+.modern-sidebar .modern-recent-job {
+  height: auto;
+  min-height: 50px;
+  display: grid;
+  justify-content: stretch;
+  gap: 3px;
+  padding: 8px 10px;
+}
+.modern-recent-job strong,
+.modern-recent-job span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modern-recent-job strong { color: #dce5e8; font-size: 0.78rem; }
+.modern-recent-job span { color: #768a94; font: 0.67rem "IBM Plex Mono", monospace; font-weight: 400; }
+.modern-sidebar .modern-recent-job:hover { background: rgba(127,183,207,.09); }
+.modern-sidebar .modern-recent-retry { font-size: 0.72rem; color: #d2a56e; }
+.modern-sidebar :is(button, a) {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--modern-muted);
+  background: transparent;
+  box-shadow: none;
+  text-decoration: none;
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-align: left;
+}
+.modern-sidebar :is(button, a):hover,
+.modern-sidebar button.is-active {
+  color: #f4f8f9;
+  background: rgba(255,255,255,0.055);
+  transform: none;
+}
+.modern-sidebar button.is-active { box-shadow: inset 2px 0 var(--modern-blue); }
+
+.modern-ui .console-shell {
+  box-sizing: border-box;
+  width: min(1540px, calc(100vw - 224px));
+  min-width: 0;
+  margin: 0;
+  padding: 0 30px 36px;
+}
+.modern-topbar {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid var(--modern-line);
+  margin-bottom: 24px;
+}
+.modern-topbar > div:first-child { min-width: 0; flex: 1 1 auto; }
+.modern-view-tabs { flex: 0 0 auto; }
+.modern-topbar h1 { margin: 2px 0 0; font-size: 1.65rem; letter-spacing: -0.025em; }
+.modern-kicker {
+  color: var(--modern-muted);
+  font: 0.68rem "IBM Plex Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+}
+.modern-view-tabs { align-self: stretch; display: flex; align-items: end; gap: 4px; }
+.modern-view-tabs :is(button, a) {
+  min-height: 42px;
+  padding: 0 13px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--modern-muted);
+  background: transparent;
+  box-shadow: none;
+  text-decoration: none;
+  font-size: 0.82rem;
+}
+.modern-view-tabs :is(button, a):hover,
+.modern-view-tabs button.is-active { color: #f3f7f8; transform: none; border-bottom-color: var(--modern-blue); }
+.modern-view-tabs :is(button, a).is-disabled { opacity: .4; pointer-events: none; }
+
+.modern-ui .panel {
+  border-color: var(--modern-line);
+  border-radius: 10px;
+  background: var(--modern-surface);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.modern-ui[data-modern-view="overview"] .panel-form,
+.modern-ui[data-modern-view="overview"] #jobs-panel,
+.modern-ui[data-modern-view="setup"] #active-job-card,
+.modern-ui[data-modern-view="setup"] #jobs-panel,
+.modern-ui[data-modern-view="jobs"] #active-job-card,
+.modern-ui[data-modern-view="jobs"] .panel-form,
+.modern-ui[data-modern-view="subtitles"] #active-job-card,
+.modern-ui[data-modern-view="subtitles"] .panel-form,
+.modern-ui[data-modern-view="subtitles"] #jobs-panel,
+.modern-ui[data-modern-view="prompt"] #active-job-card,
+.modern-ui[data-modern-view="prompt"] .panel-form,
+.modern-ui[data-modern-view="prompt"] #jobs-panel,
+.modern-ui[data-modern-view="settings"] #active-job-card,
+.modern-ui[data-modern-view="settings"] .panel-form,
+.modern-ui[data-modern-view="settings"] #jobs-panel { display: none !important; }
+.modern-ui[data-modern-view="setup"] .panel-form,
+.modern-ui[data-modern-view="jobs"] #jobs-panel { display: block; }
+
+.modern-tool-deck { display: none; min-width: 0; }
+.modern-ui[data-modern-view="subtitles"] .modern-tool-deck,
+.modern-ui[data-modern-view="prompt"] .modern-tool-deck { display: block; }
+.modern-job-settings { display: none; }
+.modern-ui[data-modern-view="settings"] .modern-job-settings { display: block; }
+.modern-settings-card { padding: 24px; }
+.modern-settings-intro { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+.modern-settings-intro span { color: var(--modern-blue); font: .68rem "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: .1em; }
+.modern-settings-intro h2 { margin: 5px 0 0; font-size: 1.25rem; }
+.modern-settings-intro p { margin: 0; color: var(--modern-muted); }
+.modern-settings-card dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.modern-settings-card dl > div { padding: 16px; border: 1px solid var(--modern-line); border-radius: 7px; background: rgba(255,255,255,.018); }
+.modern-settings-card dt { color: var(--modern-muted); font: .66rem "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: .08em; }
+.modern-settings-card dd { margin: 7px 0 0; color: #eef3f4; overflow-wrap: anywhere; }
+.modern-settings-note { display: grid; gap: 3px; margin-top: 16px; padding: 14px 16px; border-left: 3px solid var(--modern-blue); background: var(--modern-blue-soft); }
+.modern-settings-note span { color: var(--modern-muted); }
+.modern-tool-frame {
+  display: none;
+  width: 100%;
+  height: calc(100dvh - 124px);
+  border: 0;
+  border-radius: 10px;
+  background: var(--modern-bg);
+}
+.modern-ui[data-modern-view="subtitles"] .modern-subtitles-frame,
+.modern-ui[data-modern-view="prompt"] .modern-prompt-frame { display: block; }
+
+body.modern-embedded-tool { background: #0e1519; }
+.modern-embedded-tool > .tool-shell {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+.modern-embedded-tool .workspace-header > .panel-head > div:first-child,
+.modern-embedded-tool [data-console-link] { display: none !important; }
+.modern-embedded-tool .workspace-header { margin-top: 0; }
+@media (min-width: 961px) {
+  .modern-embedded-tool.review-page .review-shell { height: 100dvh; }
+}
+
+.modern-ui #active-job-card { margin: 0; padding: 0; overflow: visible; background: transparent; border: 0; }
+.modern-ui #active-job-card .context-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: relative;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.modern-ui #active-job-card .panel-head {
+  min-height: 54px;
+  padding: 13px 16px;
+  margin: 0;
+  border: 1px solid var(--modern-line);
+  border-radius: 8px;
+  background: var(--modern-surface);
+}
+.modern-ui #active-job-card .panel-head h2 { font-size: 1rem; }
+.modern-ui #active-job-card .panel-head .job-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.modern-ui #active-job-card .panel-head .job-meta .badge {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: .62rem;
+}
+.modern-ui #active-job-card .model-call-progress-top { order: 2; margin: -15px 1px 0; height: 3px; border-radius: 0; }
+.modern-ui #active-job-card .runtime-activity { order: 3; margin: 0; border-radius: 7px; background: var(--modern-blue-soft); }
+.modern-ui #active-job-card .active-job-actions { order: 1; position: absolute; top: 8px; right: 64px; z-index: 3; }
+.modern-ui #active-job-card .validation-summary { order: 4; margin: 0; gap: 0; border: 1px solid var(--modern-line); border-radius: 9px; overflow: hidden; }
+.modern-ui #active-job-card .validation-stat {
+  min-height: 82px;
+  position: relative;
+  place-content: center;
+  border: 0;
+  border-right: 1px solid var(--modern-line);
+  border-radius: 0;
+  background: rgba(255,255,255,0.018);
+  box-shadow: none;
+}
+.modern-ui #active-job-card .validation-stat:last-child { border-right: 0; }
+.modern-ui #active-job-card .validation-stat strong { font-size: 1.35rem; }
+.modern-ui #active-job-card .validation-stat-label {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  opacity: 0;
+  transform: translate(-50%, 3px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  white-space: nowrap;
+}
+.modern-ui #active-job-card .validation-stat:is(:hover, :focus-visible) .validation-stat-label {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.modern-ui #active-job-card .validation-stat:is(:hover, :focus-visible) { background: rgba(255,255,255,0.045); }
+.modern-ui #active-job-card .vision-timeline { order: 6; margin: 0; border-radius: 9px; background: var(--modern-surface); }
+.modern-ui #active-job-card .active-context-details { order: 5; position: relative; border-radius: 9px; background: var(--modern-surface); }
+.modern-ui #active-job-card .active-context-details > summary { padding: 14px 16px; }
+.modern-ui #active-job-card .active-context-details > summary::after { display: none; }
+.modern-ui #active-job-card .active-context-details-body { padding: 0 14px 14px; }
+.modern-ui #active-job-card .context-history { order: 7; }
+
+.modern-ui .active-context-details .modern-reveal-action {
+  position: absolute;
+  top: 9px;
+  right: 12px;
+  z-index: 2;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+.modern-ui .active-context-details:is(:hover, :focus-within) .modern-reveal-action { opacity: 1; transform: none; }
+.modern-ui .modern-log-button {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: auto;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  clip-path: none;
+  border: 1px solid var(--modern-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--modern-muted);
+}
+.modern-ui .modern-log-button::before,
+.modern-ui .modern-log-button .job-corner-label { display: none; }
+
+.modern-ui .session-card { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, 0.65fr); gap: 10px 14px; }
+.modern-ui .session-card > .scene { grid-column: 1; grid-row: 1; border-left: 3px solid var(--modern-blue); background: var(--modern-blue-soft); }
+.modern-ui .session-card > .tile { grid-column: 1; }
+.modern-ui .session-card > .context-section { grid-column: 2; grid-row: span 2; }
+.modern-ui .session-card > .context-section + .context-section { grid-row: auto; }
+.modern-ui .session-card :is(.tile, .scene) { border-radius: 6px; box-shadow: none; }
+.modern-ui .grid-characters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.modern-ui .grid-characters .tile-fixed {
+  min-height: 132px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.modern-ui .grid-characters .tile-fixed:hover { border-color: rgba(127,183,207,.38); background: rgba(127,183,207,.06); }
+.modern-ui .grid-characters .tile-actions { opacity: 0; transition: opacity 140ms ease; }
+.modern-ui .grid-characters .tile-fixed:is(:hover, :focus-within) .tile-actions { opacity: 1; }
+
+.modern-ui .vision-rail { padding-block: 16px 10px; }
+.modern-ui .vision-frame { transition: width 170ms ease, transform 170ms ease, border-color 170ms ease; }
+.modern-ui .vision-frame:hover,
+.modern-ui .vision-frame:focus-visible { --frame-focus-width: clamp(220px, 19vw, 290px); transform: translateY(-5px); }
+
+.modern-ui .panel-form { margin: 0; }
+.modern-ui .panel-form .panel-banner { margin-bottom: 16px; }
+.modern-ui .panel-form .panel-banner h2 { max-width: none; }
+.modern-ui .panel-form .workflow-steps { display: none; }
+.modern-ui .panel-form .form-section { border-radius: 8px; box-shadow: none; }
+.modern-ui #jobs-panel { margin: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .modern-ui *, .modern-ui *::before, .modern-ui *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+@media (max-width: 1100px) {
+  body.modern-ui { grid-template-columns: 68px minmax(0, 1fr); }
+  .modern-ui .console-shell { width: calc(100vw - 68px); padding-inline: 14px; }
+  .modern-sidebar { padding-inline: 8px; }
+  .modern-brand { padding-inline: 5px; font-size: 0; }
+  .modern-brand span { font-size: 1.05rem; }
+  .modern-sidebar :is(button, a) { font-size: 0; justify-content: center; padding: 0; }
+  .modern-sidebar button span { font-size: 1.15rem; }
+  .modern-recent-heading,
+  .modern-recent-jobs { display: none; }
+  .modern-ui .session-card { grid-template-columns: 1fr; }
+  .modern-ui .session-card > :is(.scene, .tile, .context-section) { grid-column: 1; grid-row: auto; }
+}
+
+/* Overview composition: a desktop workspace rather than a stacked report. */
+.modern-ui[data-modern-view="overview"] .console-shell {
+  max-width: none;
+  padding: 0 30px 36px;
+}
+.modern-ui[data-modern-view="overview"] .modern-topbar {
+  min-height: 96px;
+  margin-bottom: 24px;
+}
+.modern-ui[data-modern-view="overview"] .modern-topbar h1 {
+  max-width: 720px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.65rem;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .context-card {
+  gap: 20px;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card > .context-card > .panel-head {
+  min-height: 72px;
+  padding: 16px 20px;
+  border-radius: 10px;
+  background: #172127;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card > .context-card > .panel-head h2 {
+  font-size: 1.05rem;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .active-job-actions {
+  top: 14px;
+  right: 62px;
+  max-width: calc(100% - 310px);
+  justify-content: flex-end;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .active-job-actions > a[href^="/review/"] { display: none; }
+.modern-ui[data-modern-view="overview"] #active-job-card .modern-log-button {
+  top: 14px;
+  right: 14px;
+  width: 38px;
+  padding: 0;
+  justify-content: center;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .modern-log-button span:last-child {
+  position: absolute;
+  right: 0;
+  top: 44px;
+  width: max-content;
+  padding: 5px 8px;
+  border: 1px solid var(--modern-line);
+  border-radius: 5px;
+  background: #202b31;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: .14s ease;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .modern-log-button:hover span:last-child {
+  opacity: 1;
+  transform: none;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .validation-summary {
+  min-height: 104px;
+  background: #121b20;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .validation-stat {
+  min-height: 104px;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .validation-stat strong {
+  font-size: 1.75rem;
+  letter-spacing: -0.035em;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .validation-stat-label {
+  bottom: 14px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: #273239;
+  color: #dce5e8;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .vision-timeline {
+  order: 5;
+  padding: 16px 18px 12px;
+  border-color: var(--modern-line);
+  background: #121c21;
+}
+.modern-ui[data-modern-view="overview"] .vision-timeline-head {
+  min-height: 36px;
+}
+.modern-ui[data-modern-view="overview"] .vision-rail {
+  padding-block: 14px 8px;
+  gap: 10px;
+}
+.modern-ui[data-modern-view="overview"] .vision-frame {
+  min-width: 106px;
+  width: 106px;
+  border-radius: 7px;
+  overflow: hidden;
+  transform-origin: center bottom;
+}
+.modern-ui[data-modern-view="overview"] .vision-frame:hover,
+.modern-ui[data-modern-view="overview"] .vision-frame:focus-visible {
+  --frame-focus-width: clamp(250px, 22vw, 340px);
+  transform: translateY(-7px);
+  z-index: 4;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .active-context-details {
+  order: 6;
+  border: 0;
+  background: transparent;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .active-context-details > summary {
+  display: none;
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .active-context-details-body {
+  padding: 0;
+}
+.modern-ui .modern-context-composed {
+  display: block;
+}
+.modern-context-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(390px, .85fr);
+  gap: 18px;
+  align-items: stretch;
+}
+.modern-live-context,
+.modern-cast-panel {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--modern-line);
+  border-radius: 10px;
+  background: var(--modern-surface);
+}
+.modern-section-heading {
+  min-height: 48px;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.modern-section-heading > div > span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--modern-blue);
+  font: 0.65rem "IBM Plex Mono", monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.modern-section-heading h2 {
+  margin: 0;
+  font-size: 1.12rem;
+  letter-spacing: -.015em;
+}
+.modern-live-indicator {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #9cc5d5;
+  background: rgba(127,183,207,.1);
+  font-size: .7rem;
+}
+.modern-live-context > .scene {
+  min-height: 248px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(24px, 3vw, 44px);
+  border: 0;
+  border-left: 3px solid var(--modern-blue);
+  border-radius: 7px;
+  background: #1b2b31;
+  color: #f1f5f6;
+  font-size: clamp(1.05rem, 1.35vw, 1.32rem);
+  line-height: 1.55;
+}
+.modern-live-context > .scene .mini-eyebrow {
+  margin-bottom: 14px;
+  color: #8eabb6;
+  font-size: .68rem;
+}
+.modern-cast-panel {
+  max-height: 380px;
+  overflow: hidden;
+}
+.modern-cast-panel > .context-section {
+  height: calc(100% - 62px);
+  padding-right: 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.modern-cast-panel > .context-section > .mini-eyebrow {
+  display: none;
+}
+.modern-cast-panel .grid-characters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.modern-cast-panel .grid-characters .tile-fixed {
+  min-height: 210px;
+  height: 210px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 14px;
+  border: 1px solid rgba(178,204,214,.12);
+  border-radius: 7px;
+  background: #1a252b;
+}
+.modern-cast-panel .tile-fixed { cursor: pointer; }
+.modern-cast-panel .tile-fixed:focus-visible {
+  outline: 2px solid var(--modern-blue);
+  outline-offset: 2px;
+}
+.modern-cast-panel .tile-fixed h4 { min-width: 0; }
+.modern-cast-panel .tile-title-text {
+  display: inline-block;
+  max-width: calc(100% - 28px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.modern-cast-panel .tile-copy {
+  display: -webkit-box;
+  min-height: 0;
+  margin: 8px 0 12px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-height: 1.45;
+  color: #aab9bf;
+}
+.modern-cast-panel .chip-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 58px;
+  max-width: 100%;
+  margin-top: auto;
+  overflow: visible;
+  transition: max-height .16s ease, padding .16s ease, background .16s ease;
+}
+.modern-cast-panel .chip-row > .chip { display: none; }
+.modern-cast-panel .chip-row::after {
+  content: attr(data-alias-count) " " attr(data-alias-label);
+  position: static;
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: #a9bbc3;
+  background: #27343a;
+  font-size: .64rem;
+}
+.modern-cast-panel .tile-fixed:is(:hover, :focus-within) {
+  z-index: 6;
+}
+.modern-cast-panel .tile-fixed:is(:hover, :focus-within) .chip-row {
+  position: relative;
+  flex-wrap: wrap;
+  margin-top: auto;
+  align-content: flex-end;
+  padding: 0;
+  overflow: visible;
+  white-space: normal;
+  border: 0;
+  background: transparent;
+}
+.modern-cast-panel .tile-fixed:is(:hover, :focus-within) .chip-row > .chip { display: inline-flex; }
+.modern-cast-panel .tile-fixed:is(:hover, :focus-within) .chip-row::after {
+  display: none;
+}
+.modern-cast-panel .tile-actions {
+  position: absolute;
+  inset: auto 10px 10px auto;
+  pointer-events: none;
+}
+.modern-cast-panel .tile-fixed:is(:hover, :focus-within) .tile-actions { pointer-events: auto; }
+.modern-character-sheet-detail { display: grid; gap: 20px; }
+.modern-character-sheet-identity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.modern-character-sheet-identity h3 { margin: 0; font-size: 1.4rem; }
+.modern-character-sheet-identity > span,
+.modern-character-sheet-aliases > span {
+  padding: 5px 9px;
+  border: 1px solid var(--modern-line);
+  border-radius: 999px;
+  color: #c4d1d6;
+  background: #202c32;
+  font: .7rem "IBM Plex Mono", monospace;
+}
+.modern-character-sheet-detail section { display: grid; gap: 8px; }
+.modern-character-sheet-detail section > span {
+  color: var(--modern-muted);
+  font: .65rem "IBM Plex Mono", monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.modern-character-sheet-detail p { margin: 0; color: #e0e8ea; line-height: 1.65; }
+.modern-character-sheet-aliases { display: flex; flex-wrap: wrap; gap: 7px; }
+.modern-supporting-context {
+  margin-top: 18px;
+  border: 1px solid var(--modern-line);
+  border-radius: 10px;
+  background: #141e23;
+}
+.modern-supporting-context > summary {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  cursor: pointer;
+  list-style: none;
+}
+.modern-supporting-context > summary::-webkit-details-marker { display: none; }
+.modern-supporting-context > summary strong,
+.modern-supporting-context > summary span { display: block; }
+.modern-supporting-context > summary span {
+  margin-top: 3px;
+  color: var(--modern-muted);
+  font-size: .78rem;
+}
+.modern-supporting-context .modern-disclosure {
+  margin: 0;
+  color: var(--modern-blue);
+}
+.modern-supporting-context[open] .modern-disclosure { font-size: 0; }
+.modern-supporting-context[open] .modern-disclosure::after { content: "Hide"; font-size: .78rem; }
+.modern-supporting-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 18px 18px;
+}
+.modern-supporting-grid > .tile,
+.modern-supporting-grid > .context-section {
+  min-width: 0;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid rgba(178,204,214,.11);
+  border-radius: 7px;
+  background: #182329;
+}
+.modern-supporting-grid .grid-glossary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.modern-ui[data-modern-view="overview"] #active-job-card .context-history {
+  order: 7;
+  opacity: .75;
+}
+
+@media (max-width: 1250px) {
+  .modern-context-stage { grid-template-columns: minmax(0, 1fr) minmax(360px, .85fr); }
+  .modern-cast-panel .grid-characters { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .modern-context-stage { grid-template-columns: 1fr; }
+  .modern-cast-panel { max-height: none; }
+  .modern-cast-panel .grid-characters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .modern-supporting-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 1050px) {
+  .modern-ui[data-modern-view="overview"] #active-job-card > .context-card > .panel-head {
+    padding-bottom: 68px;
+  }
+  .modern-ui[data-modern-view="overview"] #active-job-card .active-job-actions {
+    top: 76px;
+    right: 62px;
+    bottom: auto;
+    left: 20px;
+    max-width: none;
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+}

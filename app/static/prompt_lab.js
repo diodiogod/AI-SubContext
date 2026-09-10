@@ -403,3 +403,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 void initializePromptLab();
+const returnToModern = new URLSearchParams(window.location.search).get("from") === "modern"
+  || document.referrer.endsWith("/modern")
+  || document.referrer.includes("/modern#");
+document.querySelector("[data-console-link]")?.setAttribute("href", returnToModern ? "/modern#overview" : "/");
