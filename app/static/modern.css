@@ -432,12 +432,13 @@ body.modern-embedded-tool { background: #0e1519; }
   gap: 14px;
 }
 .modern-ui[data-modern-view="setup"] .form-section {
-  padding: 20px;
-  gap: 14px;
+  padding: 16px 18px;
+  gap: 10px;
   border: 1px solid var(--modern-line);
   background: #121d23;
 }
 .modern-ui[data-modern-view="setup"] .source-section { grid-area: source; }
+.modern-ui[data-modern-view="setup"] .source-section { align-self: stretch; }
 .modern-ui[data-modern-view="setup"] .translation-section { grid-area: language; }
 .modern-ui[data-modern-view="setup"] .model-section { grid-area: model; }
 .modern-ui[data-modern-view="setup"] .controls-section { grid-area: context; }
@@ -449,11 +450,13 @@ body.modern-embedded-tool { background: #0e1519; }
 .modern-ui[data-modern-view="setup"] .section-title-row .mini-eyebrow { display: none; }
 .modern-ui[data-modern-view="setup"] .section-title-row h3 { font-size: 1.23rem; }
 .modern-ui[data-modern-view="setup"] .modern-section-description {
-  margin: -10px 0 2px;
+  margin: -7px 0 1px;
   color: var(--modern-muted);
   font-size: .8rem;
 }
 .modern-ui[data-modern-view="setup"] :is(input, select) {
+  min-height: 39px;
+  padding-block: 6px;
   border-color: rgba(178,204,214,.16);
   background: #111a1f;
 }
@@ -462,7 +465,7 @@ body.modern-embedded-tool { background: #0e1519; }
   box-shadow: 0 0 0 3px rgba(127,183,207,.1);
 }
 .modern-ui[data-modern-view="setup"] .drop-zone {
-  min-height: 226px;
+  min-height: 196px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -502,8 +505,8 @@ body.modern-embedded-tool { background: #0e1519; }
   grid-template-columns: 40px minmax(0,1fr) auto;
   grid-template-areas: "icon title action" "icon copy action";
   align-items: center;
-  min-height: 66px;
-  padding: 9px 12px;
+  min-height: 60px;
+  padding: 7px 12px;
 }
 .modern-ui[data-modern-view="setup"] .secondary-file .modern-file-icon { grid-area: icon; }
 .modern-ui[data-modern-view="setup"] .secondary-file .secondary-file-label { grid-area: title; }
@@ -519,7 +522,7 @@ body.modern-embedded-tool { background: #0e1519; }
   display: grid;
   grid-template-columns: 40px minmax(0,1fr) auto;
   grid-template-areas: "icon title action" "icon copy action";
-  min-height: 66px;
+  min-height: 60px;
 }
 .modern-ui[data-modern-view="setup"] .optional-source-card > summary > .modern-file-icon { grid-area: icon; }
 .modern-ui[data-modern-view="setup"] .optional-source-card > summary > span:not(.modern-file-icon):not(.modern-file-action) { grid-area: title; }
@@ -527,9 +530,38 @@ body.modern-embedded-tool { background: #0e1519; }
 .modern-ui[data-modern-view="setup"] .optional-source-card > summary > .modern-file-action { grid-area: action; }
 .modern-ui[data-modern-view="setup"] .optional-source-card > summary::after { display: none; }
 .modern-ui[data-modern-view="setup"] .model-picker {
-  padding-top: 12px;
-  border-top: 1px solid var(--modern-line);
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 6px 8px;
+  padding: 0;
+  border: 0;
 }
+.modern-ui[data-modern-view="setup"] .model-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 6px 12px;
+}
+.modern-ui[data-modern-view="setup"] .model-field > .label-row { grid-column: 1 / -1; }
+.modern-ui[data-modern-view="setup"] .model-field > input { grid-column: 1; }
+.modern-ui[data-modern-view="setup"] .model-field > :is(datalist, .model-picker) { grid-column: 2; }
+.modern-ui[data-modern-view="setup"] .model-picker-head { display: contents; }
+.modern-ui[data-modern-view="setup"] .model-picker .model-list-label { grid-column: 1; grid-row: 1; }
+.modern-ui[data-modern-view="setup"] .model-picker #load-models-btn { grid-column: 2; grid-row: 1 / span 2; align-self: end; min-height: 39px; }
+.modern-ui[data-modern-view="setup"] .model-picker #model-select { grid-column: 1; grid-row: 2; min-width: 0; }
+.modern-ui[data-modern-view="setup"] .model-picker .model-status {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modern-ui[data-modern-view="setup"] .connection-action-row { min-height: 39px; }
+.modern-ui[data-modern-view="setup"] .connection-action-row button { min-height: 39px; }
 .modern-ui[data-modern-view="setup"] .controls-section > .section-head {
   padding-bottom: 11px;
   border-bottom: 1px solid var(--modern-line);
