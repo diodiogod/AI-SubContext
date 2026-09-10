@@ -8,14 +8,31 @@
   const jobsPanel = document.getElementById("jobs-panel");
   if (!shell || !setupPanel || !overviewPanel || !jobsPanel) return;
 
+  const icon = name => {
+    const paths = {
+      plus: '<path d="M12 5v14M5 12h14"/>',
+      jobs: '<path d="M5 6h2M10 6h9M5 12h2M10 12h9M5 18h2M10 18h9"/>',
+      current: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 5v14M15 5v14"/>',
+      home: '<path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/>',
+      subtitles: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5"/>',
+      prompt: '<path d="M4 5h16v11H9l-5 4zM8 9h8M8 12h5"/>',
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1L14.5 3h-5l-.4 3.1a8 8 0 0 0-1.7 1l-2.4-1-2 3.4L5.1 11A7 7 0 0 0 5 12c0 .4 0 .7.1 1L3 14.5 5 18l2.4-1a8 8 0 0 0 1.7 1l.4 3h5l.4-3a8 8 0 0 0 1.7-1l2.4 1 2-3.5-2.1-1.5c.1-.3.1-.6.1-1z"/>',
+      file: '<path d="M7 3h7l4 4v14H7zM14 3v5h4M10 13h5M10 17h5"/>',
+      video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
+      image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 18 5-5 3 3 2-2 4 4"/>',
+      help: '<circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.3 2.4c-.7.3-1 .8-1 1.6M12 17h.01"/>',
+    };
+    return `<svg class="modern-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.file}</svg>`;
+  };
+
   const sidebar = document.createElement("aside");
   sidebar.className = "modern-sidebar";
   sidebar.innerHTML = `
     <div class="modern-brand"><span>AI</span> SubContext</div>
     <nav class="modern-primary-nav" aria-label="Application">
-      <button type="button" data-modern-view="setup" title="New translation"><span aria-hidden="true">＋</span> New translation</button>
-      <button type="button" data-modern-view="jobs" title="Saved jobs"><span aria-hidden="true">☷</span> Jobs</button>
-      <button type="button" data-modern-view="overview" title="Current job"><span aria-hidden="true">◫</span> Current job</button>
+      <button type="button" data-modern-view="setup" title="New translation">${icon("plus")} New translation</button>
+      <button type="button" data-modern-view="jobs" title="Saved jobs">${icon("jobs")} Jobs</button>
+      <button type="button" data-modern-view="overview" title="Current job">${icon("current")} Current job</button>
     </nav>
     <div class="modern-recent-heading">Recent jobs</div>
     <div class="modern-recent-jobs" data-modern-recent-jobs>
@@ -23,7 +40,7 @@
     </div>
     <div class="modern-sidebar-spacer"></div>
     <nav class="modern-secondary-nav" aria-label="Tools">
-      <button type="button" data-modern-view="prompt">Prompt Lab</button>
+      <button type="button" data-modern-view="prompt">${icon("prompt")} Prompt Lab</button>
       <a href="/">Legacy interface</a>
     </nav>
   `;
@@ -36,10 +53,10 @@
       <h1 data-modern-title>Current translation</h1>
     </div>
     <div class="modern-view-tabs" role="tablist" aria-label="Job sections">
-      <button type="button" role="tab" data-modern-view="overview">Overview</button>
-      <button type="button" role="tab" class="modern-job-tab" data-modern-view="subtitles" data-modern-workspace disabled>Subtitles</button>
-      <button type="button" role="tab" class="modern-job-tab" data-modern-view="prompt">Prompt Lab</button>
-      <button type="button" role="tab" data-modern-view="settings">Settings</button>
+      <button type="button" role="tab" data-modern-view="overview">${icon("home")} Overview</button>
+      <button type="button" role="tab" class="modern-job-tab" data-modern-view="subtitles" data-modern-workspace disabled>${icon("subtitles")} Subtitles</button>
+      <button type="button" role="tab" class="modern-job-tab" data-modern-view="prompt">${icon("prompt")} Prompt Lab</button>
+      <button type="button" role="tab" data-modern-view="settings">${icon("settings")} Settings</button>
     </div>
   `;
 
@@ -87,7 +104,7 @@
     form.classList.add("modern-setup-ready");
 
     const bannerCopy = setupPanel.querySelector(".panel-banner > div:first-child");
-    if (bannerCopy) bannerCopy.innerHTML = '<div class="mini-eyebrow">New translation</div><h2>Build a context-aware translation</h2><p>Choose the files, language, and engine. Context tools stay optional.</p>';
+    if (bannerCopy) bannerCopy.innerHTML = '<div class="mini-eyebrow">Create</div><h2>New translation</h2>';
 
     const stepLabels = ["Files", "Translation", "Engine & context"];
     setupPanel.querySelectorAll(".workflow-steps span").forEach((step, index) => {
@@ -103,6 +120,44 @@
     relabel(".source-section", "Files", "Add translation files");
     relabel(".translation-section", "Translation", "Language and title");
     relabel(".model-section", "Engine", "Translation engine");
+
+    const sourceSection = form.querySelector(".source-section");
+    const sourceHeading = sourceSection?.querySelector(".section-title-row");
+    if (sourceHeading) sourceHeading.insertAdjacentHTML("afterend", '<p class="modern-section-description">Add the files needed for translation. Only source subtitles are required.</p>');
+    const translationHeading = form.querySelector(".translation-section .section-title-row");
+    if (translationHeading) translationHeading.insertAdjacentHTML("afterend", '<p class="modern-section-description">Basic information about your project.</p>');
+    const engineHeading = form.querySelector(".model-section .section-title-row");
+    if (engineHeading) engineHeading.insertAdjacentHTML("afterend", '<p class="modern-section-description">Choose any OpenAI-compatible endpoint and translation model.</p>');
+
+    const dropZone = form.querySelector("#drop-zone");
+    if (dropZone) {
+      const input = dropZone.querySelector("input");
+      const selected = dropZone.querySelector("#selected-file");
+      const content = document.createElement("div");
+      content.innerHTML = `<span class="modern-drop-icon">${icon("file")}</span><strong>Source subtitles (.srt)</strong><span>Drag and drop your .srt file here, or click to browse</span><span class="modern-browse-button">Browse files</span><small>Only .srt files are supported.</small>`;
+      dropZone.replaceChildren();
+      if (input) dropZone.append(input);
+      while (content.firstChild) dropZone.append(content.firstChild);
+      if (selected) dropZone.append(selected);
+    }
+
+    const translated = form.querySelector("#translated-drop-zone");
+    if (translated) {
+      translated.insertAdjacentHTML("afterbegin", `<span class="modern-file-icon">${icon("file")}</span>`);
+      translated.insertAdjacentHTML("beforeend", '<span class="modern-file-action">Add file</span>');
+    }
+    for (const [selector, iconName] of [[".video-source-card > summary", "video"], [".reference-tracks-card > summary", "file"]]) {
+      const summary = form.querySelector(selector);
+      if (!summary) continue;
+      summary.insertAdjacentHTML("afterbegin", `<span class="modern-file-icon">${icon(iconName)}</span>`);
+      summary.insertAdjacentHTML("beforeend", '<span class="modern-file-action">Add file</span>');
+    }
+
+    const strategyIcons = ["file", "image", "help"];
+    form.querySelectorAll(".controls-section .checkbox-card").forEach((card, index) => {
+      const copy = card.querySelector(":scope > span");
+      if (copy) copy.insertAdjacentHTML("beforebegin", `<span class="modern-strategy-icon">${icon(strategyIcons[index] || "file")}</span>`);
+    });
 
     const launchActions = form.querySelector(".launch-actions");
     if (launchActions && launchActions.parentElement !== form) form.append(launchActions);
