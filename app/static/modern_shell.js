@@ -1,4 +1,9 @@
 (() => {
+  const theme = localStorage.getItem("ai-subcontext-modern-theme") || "system";
+  const resolvedTheme = theme === "system"
+    ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+    : theme;
+  document.body.dataset.modernTheme = resolvedTheme;
   const params = new URLSearchParams(window.location.search);
   if (params.get("embedded") === "modern") {
     document.body.classList.add("modern-embedded-tool");

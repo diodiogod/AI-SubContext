@@ -40,7 +40,8 @@
     </div>
     <div class="modern-sidebar-spacer"></div>
     <nav class="modern-secondary-nav" aria-label="Tools">
-      <button type="button" data-modern-view="prompt">${icon("prompt")} Prompt Lab</button>
+      <button type="button" data-modern-view="prompt">${icon("prompt")} Prompt defaults</button>
+      <button type="button" data-modern-app-settings>${icon("settings")} Application settings</button>
       <a href="/">Legacy interface</a>
     </nav>
   `;
@@ -62,6 +63,48 @@
 
   shell.before(sidebar);
   shell.prepend(topbar);
+
+  const appSettingsDialog = document.createElement("dialog");
+  appSettingsDialog.className = "modern-app-settings-dialog";
+  appSettingsDialog.setAttribute("aria-labelledby", "modern-app-settings-title");
+  appSettingsDialog.innerHTML = `
+    <form method="dialog" class="modern-app-settings-card">
+      <div class="modern-app-settings-head">
+        <div><div class="modern-kicker">Application</div><h2 id="modern-app-settings-title">Settings</h2></div>
+        <button type="submit" class="ghost" aria-label="Close application settings">Close</button>
+      </div>
+      <fieldset class="modern-theme-options">
+        <legend>Appearance</legend>
+        <label><input type="radio" name="modern-theme" value="system"><span><strong>System</strong><small>Follow the Windows appearance.</small></span></label>
+        <label><input type="radio" name="modern-theme" value="dark"><span><strong>Dark</strong><small>Use the dark studio interface.</small></span></label>
+        <label><input type="radio" name="modern-theme" value="light"><span><strong>Light</strong><small>Use a bright neutral interface.</small></span></label>
+      </fieldset>
+      <p class="modern-settings-scope">Translation models, languages, and context options belong to New Translation or the selected job.</p>
+    </form>`;
+  document.body.append(appSettingsDialog);
+
+  const THEME_KEY = "ai-subcontext-modern-theme";
+  const systemTheme = window.matchMedia("(prefers-color-scheme: light)");
+  const storedTheme = localStorage.getItem(THEME_KEY) || "system";
+  const applyTheme = theme => {
+    const resolved = theme === "system" ? (systemTheme.matches ? "light" : "dark") : theme;
+    document.body.dataset.modernTheme = resolved;
+    for (const frame of document.querySelectorAll(".modern-tool-deck iframe")) {
+      if (frame.contentDocument?.body) frame.contentDocument.body.dataset.modernTheme = resolved;
+    }
+    for (const option of appSettingsDialog.querySelectorAll('input[name="modern-theme"]')) option.checked = option.value === theme;
+  };
+  applyTheme(storedTheme);
+  systemTheme.addEventListener?.("change", () => {
+    if ((localStorage.getItem(THEME_KEY) || "system") === "system") applyTheme("system");
+  });
+  appSettingsDialog.addEventListener("change", event => {
+    const choice = event.target.closest('input[name="modern-theme"]');
+    if (!choice) return;
+    localStorage.setItem(THEME_KEY, choice.value);
+    applyTheme(choice.value);
+  });
+  sidebar.querySelector("[data-modern-app-settings]")?.addEventListener("click", () => appSettingsDialog.showModal());
 
   const toolDeck = document.createElement("section");
   toolDeck.className = "modern-tool-deck";

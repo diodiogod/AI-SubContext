@@ -17,6 +17,38 @@ body.modern-ui {
   scrollbar-gutter: stable;
 }
 
+body[data-modern-theme="light"] {
+  color-scheme: light;
+  --bg: #edf1f2;
+  --bg-deep: #e7ecee;
+  --panel: rgba(255, 255, 255, .96);
+  --panel-strong: #ffffff;
+  --panel-2: #f3f6f6;
+  --text: #172329;
+  --muted: #647780;
+  --line: rgba(38, 59, 67, 0.16);
+  --accent: #39738b;
+  --accent-strong: #285d73;
+  --modern-bg: #edf1f2;
+  --modern-sidebar: #f7f8f8;
+  --modern-surface: #ffffff;
+  --modern-surface-2: #f3f6f6;
+  --modern-line: rgba(38, 59, 67, 0.16);
+  --modern-muted: #647780;
+  --modern-blue: #39738b;
+  --modern-blue-soft: rgba(57, 115, 139, 0.10);
+  color: #172329;
+}
+body.modern-ui[data-modern-theme="light"] :is(.modern-brand, .modern-topbar h1, .modern-ui .panel, .modern-settings-card dd) { color: #172329; }
+body.modern-ui[data-modern-theme="light"] .modern-sidebar .modern-recent-job strong { color: #28383f; }
+body.modern-ui[data-modern-theme="light"] :is(.modern-view-tabs button.is-active, .modern-view-tabs :is(button, a):hover) { color: #172329; }
+body.modern-ui[data-modern-theme="light"] :is(.form-section, .drop-zone, .secondary-file, .optional-source-card, .checkbox-card, .advanced-settings, .modern-supporting-context, .modern-supporting-grid > .tile, .modern-supporting-grid > .context-section) {
+  color: #172329;
+  background: var(--modern-surface);
+}
+body.modern-ui[data-modern-theme="light"] :is(input, select, textarea) { color: #172329; background: #f8fafb; }
+body.modern-ui[data-modern-theme="light"] .modern-tool-frame { background: var(--modern-bg); }
+
 body.modern-tool-ui .tool-shell {
   box-sizing: border-box;
   width: min(1700px, calc(100vw - 224px));
@@ -82,6 +114,7 @@ body.modern-ui .hero { display: none; }
 .modern-secondary-nav { display: grid; gap: 5px; }
 .modern-sidebar-spacer { flex: 1; }
 .modern-secondary-nav { position: relative; z-index: 5; }
+.modern-secondary-nav [data-modern-app-settings] { margin-top: 5px; border-top: 1px solid var(--modern-line); border-radius: 0; padding-top: 5px; }
 .modern-recent-heading {
   margin: 22px 10px 8px;
   color: #6f838d;
@@ -176,6 +209,27 @@ body.modern-ui .hero { display: none; }
 .modern-view-tabs :is(button, a):hover,
 .modern-view-tabs button.is-active { color: #f3f7f8; transform: none; border-bottom-color: var(--modern-blue); }
 .modern-view-tabs :is(button, a).is-disabled { opacity: .4; pointer-events: none; }
+
+.modern-app-settings-dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--modern-line);
+  border-radius: 12px;
+  color: inherit;
+  background: var(--modern-surface);
+  box-shadow: 0 24px 80px rgba(0,0,0,.42);
+}
+.modern-app-settings-dialog::backdrop { background: rgba(4, 9, 12, .68); backdrop-filter: blur(3px); }
+.modern-app-settings-card { padding: 22px; }
+.modern-app-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+.modern-app-settings-head h2 { margin: 3px 0 0; }
+.modern-theme-options { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+.modern-theme-options legend { margin-bottom: 10px; color: var(--modern-muted); font: .7rem "IBM Plex Mono", monospace; letter-spacing: .1em; text-transform: uppercase; }
+.modern-theme-options label { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid var(--modern-line); border-radius: 8px; cursor: pointer; background: rgba(255,255,255,.018); }
+.modern-theme-options label:has(input:checked) { border-color: var(--modern-blue); background: var(--modern-blue-soft); }
+.modern-theme-options span { display: grid; gap: 2px; }
+.modern-theme-options small, .modern-settings-scope { color: var(--modern-muted); }
+.modern-settings-scope { margin: 18px 0 0; font-size: .78rem; line-height: 1.5; }
 
 .modern-ui .panel {
   border-color: var(--modern-line);
@@ -390,12 +444,7 @@ body.modern-embedded-tool { background: #0e1519; }
   font-size: 1.72rem;
   letter-spacing: -.02em;
 }
-.modern-ui[data-modern-view="setup"] .modern-topbar > div:first-child { display: none; }
-.modern-ui[data-modern-view="setup"] .modern-topbar { justify-content: flex-start; min-height: 68px; margin-bottom: 22px; }
-.modern-ui[data-modern-view="setup"] .modern-view-tabs { order: -1; align-items: center; }
-.modern-ui[data-modern-view="setup"] .modern-view-tabs :is(button, a) { padding: 0 18px; border-bottom: 0; }
-.modern-ui[data-modern-view="setup"] .modern-view-tabs :is(button, a):hover,
-.modern-ui[data-modern-view="setup"] .modern-view-tabs button.is-active { background: rgba(127,183,207,.07); border-radius: 6px; }
+.modern-ui[data-modern-view="setup"] .modern-topbar { display: none; }
 .modern-ui[data-modern-view="setup"] .panel-banner .workflow-steps {
   display: flex;
   gap: 2px;
