@@ -36,7 +36,7 @@
     <div class="modern-recent-heading">Recent jobs</div>
     <div class="modern-recent-jobs" data-modern-recent-jobs><div class="modern-recent-loading">Loading jobs…</div></div>
     <div class="modern-sidebar-spacer"></div>
-    <nav class="modern-secondary-nav" aria-label="Tools"><a href="/">Legacy interface</a></nav>
+    <nav class="modern-secondary-nav" aria-label="Tools"><a href="/legacy">Legacy interface</a></nav>
   `;
 
   const topbar = document.createElement("header");

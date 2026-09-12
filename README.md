@@ -14,8 +14,17 @@ Make quality subtitles with live context control using local models.
 Drop an `.srt`, pick languages and model, watch the context card update, and intervene when needed.
 
 <p align="center">
-  <img src="images/readme-hero.png" alt="AI SubContext main view" width="100%">
+  <img src="images/readme-hero.png" alt="AI SubContext modern translation overview" width="100%">
 </p>
+
+<details>
+<summary>View the legacy interface</summary>
+
+<p align="center">
+  <img src="images/readme-legacy.png" alt="AI SubContext legacy interface" width="100%">
+</p>
+
+</details>
 
 ## Start Here
 
@@ -27,6 +36,8 @@ Drop an `.srt`, pick languages and model, watch the context card update, and int
 ## Quick Links
 
 - Local app URL: `http://127.0.0.1:7861`
+- Legacy interface: `http://127.0.0.1:7861/legacy`
+- The former `/modern` URL remains available for existing bookmarks.
 - Windows launcher auto-switches to the next free port if `7861` is already in use.
 - Linux launcher: [`start_linux.sh`](/mnt/j/aitools/subtitle-studio/start_linux.sh)
 - Windows launcher: [`start_windows.bat`](/mnt/j/aitools/subtitle-studio/start_windows.bat)

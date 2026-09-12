@@ -2394,7 +2394,7 @@ function removeContextRow(scope, kind, button) {
 function reviewWorkspaceUrl(jobId, filter = null) {
   const params = new URLSearchParams();
   if (filter) params.set("filter", filter);
-  if (window.location.pathname === "/modern") params.set("from", "modern");
+  if (window.location.pathname !== "/legacy") params.set("from", "modern");
   const query = params.toString();
   return `/review/${encodeURIComponent(jobId)}${query ? `?${query}` : ""}`;
 }

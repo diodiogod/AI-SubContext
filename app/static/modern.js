@@ -1,5 +1,5 @@
 (() => {
-  if (window.location.pathname !== "/modern") return;
+  if (window.location.pathname === "/legacy") return;
 
   document.body.classList.add("modern-ui");
   const shell = document.querySelector(".console-shell");
@@ -42,7 +42,7 @@
     <nav class="modern-secondary-nav" aria-label="Tools">
       <button type="button" data-modern-view="prompt">${icon("prompt")} Prompt defaults</button>
       <button type="button" data-modern-app-settings>${icon("settings")} Application settings</button>
-      <a href="/">Legacy interface</a>
+      <a href="/legacy">Legacy interface</a>
     </nav>
   `;
 

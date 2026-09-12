@@ -382,6 +382,11 @@ async def modern_console() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+@app.get("/legacy")
+async def legacy_console() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
 @app.get("/review/{job_id}")
 async def review_workspace(job_id: str) -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "review.html"))
