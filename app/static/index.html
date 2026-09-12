@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/app.css?v=20260731-ux-lab-3" />
-    <link rel="stylesheet" href="/static/modern.css?v=20260910-light-theme-9" />
+    <link rel="stylesheet" href="/static/modern.css?v=20260912-jobs-library-1" />
   </head>
   <body class="console-page">
     <main class="shell console-shell">
@@ -359,10 +359,17 @@
       <section id="active-job-card" class="panel hidden"></section>
       <section id="jobs-panel" class="panel panel-jobs">
         <div class="panel-head">
-          <h2>Jobs</h2>
-          <div class="actions">
-            <button id="clear-finished-btn" class="ghost" title="Remove completed, failed, and cancelled jobs from the list.">Clear Finished</button>
-            <button id="refresh-btn" class="ghost">Refresh</button>
+          <div>
+            <h2>Saved jobs</h2>
+            <p class="jobs-panel-description">Find, resume, review, or export past translation work.</p>
+          </div>
+          <div class="actions jobs-library-actions">
+            <button id="refresh-btn" class="ghost jobs-refresh-btn" aria-label="Refresh saved jobs" title="Refresh saved jobs">↻</button>
+            <button type="button" data-modern-view="setup" class="jobs-new-translation">＋ New translation</button>
+            <details class="jobs-library-more">
+              <summary aria-label="More library actions">⌄</summary>
+              <div><button id="clear-finished-btn" class="danger ghost" title="Remove completed, failed, and cancelled jobs from the list.">Clear Finished</button></div>
+            </details>
           </div>
         </div>
         <div class="jobs-toolbar" aria-label="Find saved jobs">
@@ -377,7 +384,7 @@
             <button type="button" data-jobs-filter="completed" aria-pressed="false">Completed <span data-jobs-filter-count="completed">0</span></button>
             <button type="button" data-jobs-filter="attention" aria-pressed="false">Attention <span data-jobs-filter-count="attention">0</span></button>
           </div>
-          <button type="button" id="jobs-evidence-toggle" class="ghost jobs-evidence-toggle">Collapse evidence</button>
+          <label class="jobs-sort-control">Sort <select id="jobs-sort" aria-label="Sort saved jobs"><option value="recent">Recent first</option><option value="title">Title</option><option value="status">Status</option></select></label>
         </div>
         <div class="jobs-results-row">
           <div id="jobs-result-summary" class="job-meta" role="status" aria-live="polite"></div>
@@ -493,7 +500,7 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=20260909-modern-19"></script>
-    <script src="/static/modern.js?v=20260910-light-theme-3"></script>
+    <script src="/static/app.js?v=20260912-jobs-library-1"></script>
+    <script src="/static/modern.js?v=20260912-jobs-library-1"></script>
   </body>
 </html>

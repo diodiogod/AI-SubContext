@@ -17,6 +17,7 @@ const jobsFilterButtons = [...document.querySelectorAll("[data-jobs-filter]")];
 const jobsResultSummaryEl = document.getElementById("jobs-result-summary");
 const jobsSyncStatusEl = document.getElementById("jobs-sync-status");
 const jobsEvidenceToggle = document.getElementById("jobs-evidence-toggle");
+const jobsSortEl = document.getElementById("jobs-sort");
 const consoleToastEl = document.getElementById("console-toast");
 const confirmDialog = document.getElementById("confirm-dialog");
 const confirmDialogTitle = document.getElementById("confirm-dialog-title");
@@ -146,6 +147,8 @@ let consoleScrollRestoreAttempts = 0;
 let currentJobs = [];
 let currentJobsFilter = "all";
 let currentJobsSearch = "";
+let currentJobsSort = "recent";
+let selectedJobsLibraryId = "";
 let lastJobsPayload = "";
 let jobsFetchSequence = 0;
 let jobsFetchController = null;
@@ -2722,6 +2725,132 @@ function reconcileJobsMarkup(markup, signatures) {
   for (const [id, signature] of signatures) jobCardRenderSignatures.set(id, signature);
 }
 
+function modernJobLibraryMarkup(jobs, visibleJobs) {
+  const sortedJobs = [...visibleJobs].sort((left, right) => {
+    if (currentJobsSort === "title") {
+      return String(left.title || left.filename || "").localeCompare(String(right.title || right.filename || ""));
+    }
+    if (currentJobsSort === "status") {
+      return String(left.status || "").localeCompare(String(right.status || ""));
+    }
+    return 0;
+  });
+  if (!sortedJobs.some(job => job.id === selectedJobsLibraryId)) {
+    selectedJobsLibraryId = sortedJobs[0]?.id || "";
+  }
+  const selected = sortedJobs.find(job => job.id === selectedJobsLibraryId) || null;
+  const rowMarkup = sortedJobs.map(job => {
+    const counts = jobReviewCounts(job);
+    const sourceCount = jobSourceCount(job);
+    const translatedCount = jobTranslatedCount(job);
+    const title = escapeHtml(job.title || job.filename || "Untitled job");
+    const filename = escapeHtml(job.filename || "Unknown file");
+    const sourceLanguage = escapeHtml(job?.settings?.source_language || "n/a");
+    const targetLanguage = escapeHtml(job?.settings?.target_language || "n/a");
+    const model = escapeHtml(job?.settings?.model || "No model");
+    const selectedClass = job.id === selectedJobsLibraryId ? " is-selected" : "";
+    return `
+      <article class="modern-job-row${selectedClass}" data-job-id="${escapeHtml(job.id)}" tabindex="0" aria-selected="${job.id === selectedJobsLibraryId}">
+        <div class="modern-job-row-identity">
+          ${statusBadge(job.status)}
+          <strong>${title}</strong>
+          <span>${filename}</span>
+        </div>
+        <span class="modern-job-language">${sourceLanguage} → ${targetLanguage}</span>
+        <span class="modern-job-model">${model}</span>
+        <div class="modern-job-row-progress">
+          <span><strong>${translatedCount}</strong> / ${sourceCount || 0}</span>
+          <div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div></div>
+          <small>${formatProgress(job.progress)}</small>
+        </div>
+        <div class="modern-job-row-validation">
+          ${counts.suspect ? `<span class="is-suspect"><strong>${counts.suspect}</strong><small>suspect</small></span>` : ""}
+          ${counts.fixed ? `<span class="is-fixed"><strong>${counts.fixed}</strong><small>fixed</small></span>` : ""}
+          ${counts.error ? `<span class="is-error"><strong>${counts.error}</strong><small>errors</small></span>` : ""}
+          ${!counts.suspect && !counts.fixed && !counts.error ? '<span class="is-clear">—</span>' : ""}
+        </div>
+        <button type="button" class="modern-job-row-more ghost" aria-label="Open job actions" data-inspector-actions="${escapeHtml(job.id)}">•••</button>
+      </article>`;
+  }).join("");
+
+  if (!selected) {
+    return `<div class="modern-jobs-library"><div class="job-list"><div class="jobs-empty-filter"><strong>No matching jobs</strong><span>Try another status or search term. No jobs were removed.</span></div></div></div>`;
+  }
+
+  const counts = jobReviewCounts(selected);
+  const sourceCount = jobSourceCount(selected);
+  const translatedCount = jobTranslatedCount(selected);
+  const referenceTracks = Array.isArray(selected.reference_tracks) ? selected.reference_tracks : [];
+  const vision = selected.vision_stats || {};
+  const visionEnabled = Boolean(selected?.settings?.adaptive_vision || selected?.settings?.visual_scene_context);
+  const canResume = selected.status === "paused" || selected.status === "failed";
+  const canReload = selected.status !== "processing" && selected.status !== "queued";
+  const canEditContext = selected?.job_kind !== "review";
+  const kind = selected?.job_kind === "review" ? "Validation Review" : "Translation";
+  const sourceLanguage = escapeHtml(selected?.settings?.source_language || "n/a");
+  const targetLanguage = escapeHtml(selected?.settings?.target_language || "n/a");
+  const model = escapeHtml(selected?.settings?.model || "No model");
+  const detailTitle = escapeHtml(selected.title || selected.filename || "Untitled job");
+  const filename = escapeHtml(selected.filename || "Unknown file");
+  const logCount = jobLogCount(selected);
+  const detailMessage = escapeHtml(selected.message || "Waiting for update.");
+  const resumeLabel = selected.status === "failed" ? "Resume failed job" : "Resume translation";
+  const reloadLabel = selected?.job_kind === "review" ? "Load review" : selected.status === "cancelled" ? "Restart clean" : "Load again";
+  const visionFrames = Math.max(
+    Number(selected.visual_frame_count || 0),
+    Array.isArray(selected.visual_frames) ? selected.visual_frames.length : 0,
+  );
+  const sceneGuides = Math.max(
+    Number(vision.scene_cards_created || 0),
+    Array.isArray(selected.visual_scene_contexts) ? selected.visual_scene_contexts.length : 0,
+  );
+  return `
+    <div class="modern-jobs-library">
+      <div class="modern-jobs-table">
+        <div class="modern-jobs-columns" aria-hidden="true"><span>Title / file</span><span>Language</span><span>Model</span><span>Progress</span><span>Validation</span><span></span></div>
+        <div class="job-list">${rowMarkup}</div>
+      </div>
+      <aside class="modern-job-inspector" data-job-id="${escapeHtml(selected.id)}">
+        <div class="modern-job-inspector-head">
+          <div>${statusBadge(selected.status)}<h3>${detailTitle}</h3></div>
+          <button class="ghost modern-inspector-more" aria-label="More job actions" data-inspector-actions="${escapeHtml(selected.id)}">•••</button>
+        </div>
+        <div class="modern-job-inspector-file">${filename}</div>
+        <div class="modern-job-inspector-facts"><span>${sourceLanguage} → ${targetLanguage}</span><span>${model}</span><span>${escapeHtml(kind)}</span></div>
+        <div class="modern-job-inspector-progress">
+          <div><strong>${translatedCount}</strong><span> / ${sourceCount || 0} lines</span><b>${formatProgress(selected.progress)}</b></div>
+          <div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(selected.progress || 0)))}%"></div></div>
+        </div>
+        <div class="modern-job-inspector-health">
+          <button data-action="open-workspace" data-id="${selected.id}" data-filter="all"><strong>${translatedCount}</strong><span>translated</span></button>
+          <button class="is-suspect" data-action="open-workspace" data-id="${selected.id}" data-filter="suspect"><strong>${counts.suspect}</strong><span>suspect</span></button>
+          <button class="is-fixed" data-action="open-workspace" data-id="${selected.id}" data-filter="fixed"><strong>${counts.fixed}</strong><span>fixed</span></button>
+          <button class="is-error" data-action="open-workspace" data-id="${selected.id}" data-filter="error"><strong>${counts.error}</strong><span>errors</span></button>
+        </div>
+        <div class="modern-job-inspector-actions">
+          ${canResume ? `<button data-action="resume" data-id="${selected.id}">▶ ${escapeHtml(resumeLabel)}</button>` : ""}
+          <button class="ghost" data-action="open-workspace" data-id="${selected.id}">Open subtitles</button>
+          ${selected.status === "completed" ? `<button class="ghost" data-action="download" data-id="${selected.id}">Download</button>` : ""}
+          <button class="ghost" data-action="logs" data-id="${selected.id}">Log${logCount ? ` · ${logCount}` : ""}</button>
+        </div>
+        <div class="modern-job-last-activity"><span>Last activity</span><strong>${detailMessage}</strong></div>
+        ${(visionEnabled || referenceTracks.length) ? `<div class="modern-job-inspector-secondary">
+          ${visionEnabled ? `<details><summary><span>Context &amp; evidence</span><small>${visionFrames} frames${sceneGuides ? ` · ${sceneGuides} scene guides` : ""}</small></summary><div>${renderVisionTimeline(selected, false, "job")}</div></details>` : ""}
+          <details><summary><span>Reference tracks</span><small>${referenceTracks.length || "None"}</small></summary>${referenceTracks.length ? `<div class="reference-track-summary-list">${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}</div>` : '<div class="job-meta">No reference subtitle tracks.</div>'}</details>
+        </div>` : ""}
+        <details class="job-more-actions modern-inspector-actions-menu">
+          <summary>More actions</summary>
+          <div>
+            <button class="ghost" data-action="reload-job" data-id="${selected.id}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
+            <button class="ghost" data-action="edit" data-id="${selected.id}" ${!canEditContext ? "disabled" : ""}>Edit context</button>
+            <button class="ghost" data-action="review-lines" data-id="${selected.id}" data-filter="all" ${jobIssueCount(selected) ? "" : "disabled"}>Review lines</button>
+            <button class="danger ghost" data-action="delete-job" data-id="${selected.id}" ${(selected.status === "processing" || selected.status === "queued") ? "disabled" : ""}>Delete job</button>
+          </div>
+        </details>
+      </aside>
+    </div>`;
+}
+
 function renderJobs(jobs) {
   const focusKey = captureJobsFocus();
   captureVisionRailScrolls(activeJobCard);
@@ -2782,6 +2911,13 @@ function renderJobs(jobs) {
     return acc;
   }, { total: 0, queued: 0, processing: 0, paused: 0, completed: 0, failed: 0, cancelled: 0 });
   const attentionCount = jobs.filter(jobNeedsAttention).length;
+
+  if (document.body.classList.contains("modern-ui")) {
+    jobsEl.innerHTML = modernJobLibraryMarkup(jobs, visibleJobs);
+    refreshVisionRails(jobsEl);
+    requestAnimationFrame(() => restoreJobsFocus(focusKey));
+    return;
+  }
 
   const nextJobsMarkup = `
     <div class="jobs-summary">
@@ -4277,6 +4413,25 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".tips-history")) {
     closeLanguageTipsMenus();
   }
+  const inspectorActions = event.target.closest("[data-inspector-actions]");
+  if (inspectorActions) {
+    selectedJobsLibraryId = inspectorActions.dataset.inspectorActions || selectedJobsLibraryId;
+    renderJobs(currentJobs);
+    requestAnimationFrame(() => {
+      const menu = jobsEl?.querySelector(".modern-inspector-actions-menu");
+      if (menu) {
+        menu.open = true;
+        menu.querySelector("summary")?.focus();
+      }
+    });
+    return;
+  }
+  const libraryRow = event.target.closest(".modern-job-row[data-job-id]");
+  if (libraryRow && !event.target.closest("[data-action]")) {
+    selectedJobsLibraryId = libraryRow.dataset.jobId || "";
+    renderJobs(currentJobs);
+    return;
+  }
   const historySummary = event.target.closest(".context-history-summary");
   if (historySummary) {
     const details = historySummary.closest("[data-context-history]");
@@ -4480,6 +4635,17 @@ jobsSearchEl?.addEventListener("input", () => {
   currentJobsSearch = jobsSearchEl.value;
   renderJobs(currentJobs);
   scheduleConsoleUiSave();
+});
+jobsSortEl?.addEventListener("change", () => {
+  currentJobsSort = jobsSortEl.value || "recent";
+  renderJobs(currentJobs);
+});
+jobsEl?.addEventListener("keydown", event => {
+  const row = event.target.closest(".modern-job-row[data-job-id]");
+  if (!row || !["Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  selectedJobsLibraryId = row.dataset.jobId || "";
+  renderJobs(currentJobs);
 });
 for (const button of jobsFilterButtons) {
   button.addEventListener("click", () => {
