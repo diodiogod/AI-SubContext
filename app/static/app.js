@@ -149,6 +149,8 @@ let currentJobsFilter = "all";
 let currentJobsSearch = "";
 let currentJobsSort = "recent";
 let selectedJobsLibraryId = "";
+let openModernJobMenuId = "";
+let openModernInspectorMenu = "";
 let lastJobsPayload = "";
 let jobsFetchSequence = 0;
 let jobsFetchController = null;
@@ -2726,6 +2728,20 @@ function reconcileJobsMarkup(markup, signatures) {
 }
 
 function modernJobLibraryMarkup(jobs, visibleJobs) {
+  const actionsMarkup = job => {
+    const canResumeJob = job.status === "paused" || job.status === "failed";
+    const canReloadJob = job.status !== "processing" && job.status !== "queued";
+    const reloadText = job?.job_kind === "review" ? "Load review" : job.status === "cancelled" ? "Restart clean" : "Load again";
+    return `
+      ${canResumeJob ? `<button data-action="resume" data-id="${job.id}">Resume translation</button>` : ""}
+      <button data-action="open-workspace" data-id="${job.id}">Open subtitles</button>
+      ${job.status === "completed" ? `<button data-action="download" data-id="${job.id}">Download</button>` : ""}
+      <button data-action="logs" data-id="${job.id}">Open log</button>
+      <button data-action="reload-job" data-id="${job.id}" ${canReloadJob ? "" : "disabled"}>${reloadText}</button>
+      <button data-action="edit" data-id="${job.id}" ${job?.job_kind !== "review" ? "" : "disabled"}>Edit context</button>
+      <button data-action="review-lines" data-id="${job.id}" data-filter="all" ${jobIssueCount(job) ? "" : "disabled"}>Review lines</button>
+      <button class="danger" data-action="delete-job" data-id="${job.id}" ${(job.status === "processing" || job.status === "queued") ? "disabled" : ""}>Delete job</button>`;
+  };
   const sortedJobs = [...visibleJobs].sort((left, right) => {
     if (currentJobsSort === "title") {
       return String(left.title || left.filename || "").localeCompare(String(right.title || right.filename || ""));
@@ -2769,7 +2785,10 @@ function modernJobLibraryMarkup(jobs, visibleJobs) {
           ${counts.error ? `<span class="is-error"><strong>${counts.error}</strong><small>errors</small></span>` : ""}
           ${!counts.suspect && !counts.fixed && !counts.error ? '<span class="is-clear">—</span>' : ""}
         </div>
-        <button type="button" class="modern-job-row-more ghost" aria-label="Open job actions" data-inspector-actions="${escapeHtml(job.id)}">•••</button>
+        <details class="job-more-actions modern-job-row-menu" ${openModernJobMenuId === job.id ? "open" : ""}>
+          <summary class="modern-job-row-more ghost" aria-label="Open job actions" data-modern-row-menu="${escapeHtml(job.id)}">•••</summary>
+          <div>${actionsMarkup(job)}</div>
+        </details>
       </article>`;
   }).join("");
 
@@ -2784,8 +2803,6 @@ function modernJobLibraryMarkup(jobs, visibleJobs) {
   const vision = selected.vision_stats || {};
   const visionEnabled = Boolean(selected?.settings?.adaptive_vision || selected?.settings?.visual_scene_context);
   const canResume = selected.status === "paused" || selected.status === "failed";
-  const canReload = selected.status !== "processing" && selected.status !== "queued";
-  const canEditContext = selected?.job_kind !== "review";
   const kind = selected?.job_kind === "review" ? "Validation Review" : "Translation";
   const sourceLanguage = escapeHtml(selected?.settings?.source_language || "n/a");
   const targetLanguage = escapeHtml(selected?.settings?.target_language || "n/a");
@@ -2795,7 +2812,6 @@ function modernJobLibraryMarkup(jobs, visibleJobs) {
   const logCount = jobLogCount(selected);
   const detailMessage = escapeHtml(selected.message || "Waiting for update.");
   const resumeLabel = selected.status === "failed" ? "Resume failed job" : "Resume translation";
-  const reloadLabel = selected?.job_kind === "review" ? "Load review" : selected.status === "cancelled" ? "Restart clean" : "Load again";
   const visionFrames = Math.max(
     Number(selected.visual_frame_count || 0),
     Array.isArray(selected.visual_frames) ? selected.visual_frames.length : 0,
@@ -2813,7 +2829,10 @@ function modernJobLibraryMarkup(jobs, visibleJobs) {
       <aside class="modern-job-inspector" data-job-id="${escapeHtml(selected.id)}">
         <div class="modern-job-inspector-head">
           <div>${statusBadge(selected.status)}<h3>${detailTitle}</h3></div>
-          <button class="ghost modern-inspector-more" aria-label="More job actions" data-inspector-actions="${escapeHtml(selected.id)}">•••</button>
+          <details class="job-more-actions modern-inspector-head-menu" ${openModernInspectorMenu === "head" ? "open" : ""}>
+            <summary class="modern-inspector-more ghost" aria-label="More job actions" data-modern-inspector-menu="head">•••</summary>
+            <div>${actionsMarkup(selected)}</div>
+          </details>
         </div>
         <div class="modern-job-inspector-file">${filename}</div>
         <div class="modern-job-inspector-facts"><span>${sourceLanguage} → ${targetLanguage}</span><span>${model}</span><span>${escapeHtml(kind)}</span></div>
@@ -2838,14 +2857,9 @@ function modernJobLibraryMarkup(jobs, visibleJobs) {
           ${visionEnabled ? `<details><summary><span>Context &amp; evidence</span><small>${visionFrames} frames${sceneGuides ? ` · ${sceneGuides} scene guides` : ""}</small></summary><div>${renderVisionTimeline(selected, false, "job")}</div></details>` : ""}
           <details><summary><span>Reference tracks</span><small>${referenceTracks.length || "None"}</small></summary>${referenceTracks.length ? `<div class="reference-track-summary-list">${referenceTracks.map(track => renderReferenceTrackSummary(track, true, sourceCount)).join("")}</div>` : '<div class="job-meta">No reference subtitle tracks.</div>'}</details>
         </div>` : ""}
-        <details class="job-more-actions modern-inspector-actions-menu">
-          <summary>More actions</summary>
-          <div>
-            <button class="ghost" data-action="reload-job" data-id="${selected.id}" ${!canReload ? "disabled" : ""}>${escapeHtml(reloadLabel)}</button>
-            <button class="ghost" data-action="edit" data-id="${selected.id}" ${!canEditContext ? "disabled" : ""}>Edit context</button>
-            <button class="ghost" data-action="review-lines" data-id="${selected.id}" data-filter="all" ${jobIssueCount(selected) ? "" : "disabled"}>Review lines</button>
-            <button class="danger ghost" data-action="delete-job" data-id="${selected.id}" ${(selected.status === "processing" || selected.status === "queued") ? "disabled" : ""}>Delete job</button>
-          </div>
+        <details class="job-more-actions modern-inspector-actions-menu" ${openModernInspectorMenu === "footer" ? "open" : ""}>
+          <summary data-modern-inspector-menu="footer">More actions</summary>
+          <div>${actionsMarkup(selected)}</div>
         </details>
       </aside>
     </div>`;
@@ -4113,6 +4127,8 @@ function bindReferenceTrackCard(zone) {
 }
 
 async function performAction(action, jobId, filter = "all", trigger = null) {
+  openModernJobMenuId = "";
+  openModernInspectorMenu = "";
   if (action === "open-workspace") {
     saveConsoleScrollState();
     window.location.href = reviewWorkspaceUrl(jobId, filter || "all");
@@ -4413,21 +4429,26 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".tips-history")) {
     closeLanguageTipsMenus();
   }
-  const inspectorActions = event.target.closest("[data-inspector-actions]");
-  if (inspectorActions) {
-    selectedJobsLibraryId = inspectorActions.dataset.inspectorActions || selectedJobsLibraryId;
+  const rowMenuToggle = event.target.closest("[data-modern-row-menu]");
+  if (rowMenuToggle) {
+    event.preventDefault();
+    const jobId = rowMenuToggle.dataset.modernRowMenu || "";
+    openModernJobMenuId = openModernJobMenuId === jobId ? "" : jobId;
+    openModernInspectorMenu = "";
     renderJobs(currentJobs);
-    requestAnimationFrame(() => {
-      const menu = jobsEl?.querySelector(".modern-inspector-actions-menu");
-      if (menu) {
-        menu.open = true;
-        menu.querySelector("summary")?.focus();
-      }
-    });
+    return;
+  }
+  const inspectorMenuToggle = event.target.closest("[data-modern-inspector-menu]");
+  if (inspectorMenuToggle) {
+    event.preventDefault();
+    const location = inspectorMenuToggle.dataset.modernInspectorMenu || "";
+    openModernInspectorMenu = openModernInspectorMenu === location ? "" : location;
+    openModernJobMenuId = "";
+    renderJobs(currentJobs);
     return;
   }
   const libraryRow = event.target.closest(".modern-job-row[data-job-id]");
-  if (libraryRow && !event.target.closest("[data-action]")) {
+  if (libraryRow && !event.target.closest("[data-action], .modern-job-row-menu")) {
     selectedJobsLibraryId = libraryRow.dataset.jobId || "";
     renderJobs(currentJobs);
     return;

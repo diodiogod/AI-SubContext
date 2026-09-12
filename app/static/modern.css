@@ -1561,7 +1561,7 @@ body[data-modern-theme="light"] dialog::backdrop {
   border-radius: 9px;
   background: #111c22;
 }
-.modern-jobs-table { min-width: 0; overflow: hidden; }
+.modern-jobs-table { min-width: 0; }
 .modern-jobs-columns,
 .modern-job-row {
   display: grid;
@@ -1613,8 +1613,33 @@ body[data-modern-theme="light"] dialog::backdrop {
 .modern-job-row-validation .is-suspect strong { color: var(--accent-2); }
 .modern-job-row-validation .is-fixed strong { color: var(--ok); }
 .modern-job-row-validation .is-error strong { color: var(--danger); }
+.modern-job-row-menu { justify-self: end; }
 .modern-job-row-more { min-width: 30px; min-height: 30px; padding: 0; opacity: .35; }
 .modern-job-row:is(:hover,.is-selected) .modern-job-row-more { opacity: 1; }
+.modern-job-row-menu > div,
+.modern-inspector-head-menu > div,
+.modern-inspector-actions-menu > div {
+  max-height: min(430px, 70vh);
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 9px;
+}
+.modern-ui :is(.modern-job-row-menu, .modern-inspector-head-menu, .modern-inspector-actions-menu) > div button {
+  min-height: 34px;
+  padding: 7px 10px;
+  color: #eef5f5 !important;
+  font-size: .72rem;
+  line-height: 1.2;
+}
+.modern-ui :is(.modern-job-row-menu, .modern-inspector-head-menu, .modern-inspector-actions-menu) > div button:hover:not(:disabled) {
+  background: rgba(127,183,207,.09);
+}
+.modern-ui :is(.modern-job-row-menu, .modern-inspector-head-menu, .modern-inspector-actions-menu) > div button.danger {
+  color: var(--danger) !important;
+}
+.modern-job-row-menu > div { top: calc(100% + 5px); right: 0; }
+.modern-inspector-head-menu { margin-left: auto; }
+.modern-inspector-head-menu > div { top: calc(100% + 5px); right: 0; }
 .modern-job-inspector {
   position: sticky;
   top: 18px;
@@ -1657,10 +1682,18 @@ body[data-modern-theme="light"] dialog::backdrop {
 .modern-job-inspector-secondary .vision-timeline { margin: 0; padding: 8px; }
 .modern-inspector-actions-menu { margin-top: 14px; border-top: 0; }
 .modern-inspector-actions-menu > summary { min-height: 36px; padding: 7px 10px; border: 1px solid var(--modern-line); border-radius: 7px; }
+.modern-inspector-actions-menu > div { right: auto; left: 0; }
 
 body.modern-ui[data-modern-theme="light"] .modern-jobs-table,
 body.modern-ui[data-modern-theme="light"] .modern-job-inspector { background: #ffffff; }
 body.modern-ui[data-modern-theme="light"] .jobs-library-more > div { background: #ffffff; }
+body.modern-ui[data-modern-theme="light"] :is(.modern-job-row-menu, .modern-inspector-head-menu, .modern-inspector-actions-menu) > div {
+  background: #ffffff;
+  box-shadow: 0 16px 34px rgba(25,45,53,.16);
+}
+body.modern-ui[data-modern-theme="light"] :is(.modern-job-row-menu, .modern-inspector-head-menu, .modern-inspector-actions-menu) > div button:not(.danger) {
+  color: #172329 !important;
+}
 body.modern-ui[data-modern-theme="light"] .modern-job-row:hover { background: rgba(57,115,139,.045); }
 body.modern-ui[data-modern-theme="light"] .modern-job-row.is-selected { background: rgba(57,115,139,.09); }
 body.modern-ui[data-modern-theme="light"] .modern-job-language,
