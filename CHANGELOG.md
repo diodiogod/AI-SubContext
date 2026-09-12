@@ -5,6 +5,17 @@ All notable changes to AI SubContext are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-12
+
+### Added
+
+- Introduce the redesigned AI SubContext interface
+- The modern translation console now opens by default, with the previous interface available at /legacy
+- Translation setup, saved jobs, live context, character sheets, visual evidence, subtitles, Prompt Lab, and settings now share one cohesive workspace
+- Dark and light themes provide readable, consistent styling throughout the application
+- Job menus, navigation, context expansion, character details, and review actions behave more reliably
+- Subtitle validation and retranslation handling are more robust
+- Project documentation now shows the current interface while keeping the legacy view available
 ## [0.3.0] - 2026-06-25
 
 ### Added
